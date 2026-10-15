@@ -3,12 +3,14 @@ package core
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shenaba/2s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 )
 
 // fakeKicker is an inbound with a session registry (fakeInbound is in
@@ -36,14 +38,30 @@ func kicker(tag string, typ string, result usersession.Result) *fakeKicker {
 	return &fakeKicker{fakeInbound: fakeInbound{name: tag}, typ: typ, result: result}
 }
 
-// What a kick reports, end to end on a real tracker: only a QUIC inbound, and
-// only one the user had a routed connection on before anything was closed.
-func TestDisconnectReportsLiveQUICInbounds(t *testing.T) {
+// typedInbound is an inbound with no registry, of a given type.
+type typedInbound struct {
+	fakeInbound
+	typ string
+}
+
+func (f *typedInbound) Type() string { return f.typ }
+
+func ssInbound(tag string) *typedInbound {
+	return &typedInbound{fakeInbound: fakeInbound{name: tag}, typ: C.TypeShadowsocks}
+}
+
+func ssOptions(multiplex bool) *option.ShadowsocksInboundOptions {
+	return &option.ShadowsocksInboundOptions{Multiplex: &option.InboundMultiplexOptions{Enabled: multiplex}}
+}
+
+// What a kick reports, end to end on a real tracker: a QUIC inbound or a
+// Shadowsocks one running with multiplex, and only one the user had a routed
+// connection on before anything was closed. Sorted by tag.
+func TestDisconnectReportsLiveInbounds(t *testing.T) {
 	tr := NewConnTracker()
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "hy2"
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "vless"
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "anytls"
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "ss"
+	for _, tag := range []string{"hy2", "vless", "anytls", "ss-mux", "ss-plain"} {
+		track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = tag
+	}
 	track(tr, "bob", "2.2.2.2", 100, 100, t).Inbound = "tuic"
 
 	vless := kicker("vless", C.TypeVLESS, usersession.Result{Cut: 1})
@@ -60,62 +78,103 @@ func TestDisconnectReportsLiveQUICInbounds(t *testing.T) {
 	tuic := kicker("tuic", C.TypeTUIC, usersession.Result{Unclosable: 1})
 	// A stray stream left in anytls's seen set: live, but never a session.
 	anytls := kicker("anytls", C.TypeAnyTLS, usersession.Result{Unclosable: 1})
-	// Live, with no registry to ask; handed back for the service to judge.
-	ss := &typedInbound{fakeInbound: fakeInbound{name: "ss"}, typ: C.TypeShadowsocks}
+	options := map[string]any{
+		"ss-mux":   ssOptions(true),
+		"ss-plain": ssOptions(false),
+		// Multiplex on, but alice is not on it.
+		"ss-idle": ssOptions(true),
+	}
 
-	result, live := disconnect(tr, []adapter.Inbound{vless, hy2, tuic, anytls, ss}, "alice")
+	inbounds := []adapter.Inbound{vless, ssInbound("ss-mux"), hy2, tuic, anytls, ssInbound("ss-plain"), ssInbound("ss-idle")}
+	result := disconnect(tr, inbounds, "alice", func(tag string) any { return options[tag] })
 
 	for _, k := range []*fakeKicker{vless, hy2, tuic, anytls} {
 		if !reflect.DeepEqual(k.kicked, []string{"alice"}) {
 			t.Errorf("%s kicked %v, want [alice] -- every registry is asked, live or not", k.name, k.kicked)
 		}
 	}
-	wantLive := map[string]string{
-		"hy2":    C.TypeHysteria2,
-		"vless":  C.TypeVLESS,
-		"anytls": C.TypeAnyTLS,
-		"ss":     C.TypeShadowsocks,
+	want := []UnclosableInbound{
+		{Tag: "hy2", Reason: UnclosableQUIC},
+		{Tag: "ss-mux", Reason: UnclosableMux},
 	}
-	if !reflect.DeepEqual(live, wantLive) {
-		t.Errorf("live = %v, want %v", live, wantLive)
-	}
-	want := []UnclosableInbound{{Tag: "hy2", Reason: UnclosableQUIC}}
 	if !reflect.DeepEqual(result.UnclosableInbounds, want) {
 		t.Errorf("UnclosableInbounds = %+v, want %+v", result.UnclosableInbounds, want)
 	}
 	if result.Sessions != 1 {
 		t.Errorf("Sessions = %d, want 1", result.Sessions)
 	}
-	if result.Connections != 4 {
-		t.Errorf("Connections = %d, want 4 -- alice's, not bob's", result.Connections)
+	if result.Connections != 5 {
+		t.Errorf("Connections = %d, want 5 -- alice's, not bob's", result.Connections)
 	}
 	if n, _ := tr.CloseConnByUser("bob"); n != 1 {
 		t.Errorf("bob had %d connections left, want his tuic one left alone", n)
 	}
 }
 
-// typedInbound is an inbound with no registry, of a given type.
-type typedInbound struct {
-	fakeInbound
-	typ string
+func TestQuicInbound(t *testing.T) {
+	for typ, want := range map[string]bool{
+		C.TypeHysteria:    true,
+		C.TypeHysteria2:   true,
+		C.TypeTUIC:        true,
+		C.TypeAnyTLS:      false,
+		C.TypeVLESS:       false,
+		C.TypeVMess:       false,
+		C.TypeTrojan:      false,
+		C.TypeShadowsocks: false,
+	} {
+		if got := quicInbound(typ); got != want {
+			t.Errorf("quicInbound(%s) = %v, want %v", typ, got, want)
+		}
+	}
 }
 
-func (f *typedInbound) Type() string { return f.typ }
-
-func TestUnclosableReason(t *testing.T) {
-	for typ, want := range map[string]string{
-		C.TypeHysteria:    UnclosableQUIC,
-		C.TypeHysteria2:   UnclosableQUIC,
-		C.TypeTUIC:        UnclosableQUIC,
-		C.TypeAnyTLS:      "",
-		C.TypeVLESS:       "",
-		C.TypeVMess:       "",
-		C.TypeTrojan:      "",
-		C.TypeShadowsocks: "",
+// The registry hands constructors a pointer; a value or anything else must not
+// panic, and only an enabled multiplex counts.
+func TestShadowsocksMultiplex(t *testing.T) {
+	var nilOptions *option.ShadowsocksInboundOptions
+	for name, tc := range map[string]struct {
+		options any
+		want    bool
+	}{
+		"on":           {ssOptions(true), true},
+		"off":          {ssOptions(false), false},
+		"no multiplex": {&option.ShadowsocksInboundOptions{}, false},
+		"value":        {*ssOptions(true), true},
+		"nil pointer":  {nilOptions, false},
+		"no recipe":    {nil, false},
+		"other type":   {&option.VLESSInboundOptions{}, false},
 	} {
-		if got := unclosableReason(typ); got != want {
-			t.Errorf("unclosableReason(%s) = %q, want %q", typ, got, want)
+		if got := shadowsocksMultiplex(tc.options); got != tc.want {
+			t.Errorf("%s: shadowsocksMultiplex = %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+// The options a kick asks about are the ones the inbound runs with: recorded on
+// create, replaced with it, gone with it.
+func TestInboundOptionsFollowTheTable(t *testing.T) {
+	var closed []string
+	m, _ := fakeManager(t, func(r recipe) (adapter.Inbound, error) { return &fakeInbound{name: r.tag, closed: &closed}, nil },
+		adapter.StartStateInitialize)
+	first, second := ssOptions(false), ssOptions(true)
+
+	if err := m.Create(t.Context(), nil, nil, "ss", C.TypeShadowsocks, first); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.options("ss"); got != any(first) {
+		t.Errorf("options after create = %v, want the created ones", got)
+	}
+	if err := m.Create(t.Context(), nil, nil, "ss", C.TypeShadowsocks, second); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.options("ss"); got != any(second) {
+		t.Errorf("options after replace = %v, want the new ones", got)
+	}
+	if err := m.Remove("ss"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.options("ss"); got != nil {
+		t.Errorf("options after remove = %v, want none", got)
 	}
 }
 
@@ -130,7 +189,7 @@ func TestDisconnectResultJSON(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		const want = `{"connections":3,"sessions":0,"unclosable":1,"unclosableInbounds":[{"tag":"hy2","reason":"quic"}]}`
+		const want = `{"connections":3,"sessions":0,"unclosableInbounds":[{"tag":"hy2","reason":"quic"}],"unclosable":1}`
 		if string(raw) != want {
 			t.Errorf("%s: json = %s\nwant   %s", name, raw, want)
 		}
@@ -151,5 +210,27 @@ func TestDisconnectResultJSON(t *testing.T) {
 	}
 	if old.Connections != 2 || old.Sessions != 1 || len(old.UnclosableInbounds) != 0 || old.Wire().Unclosable != 0 {
 		t.Errorf("decoded an old node's answer as %+v, want its count dropped", old)
+	}
+}
+
+// Every field of DisconnectResult reaches the wire, with nothing to keep in
+// step: a wire struct that copied the fields would drop a new one silently.
+func TestDisconnectWireCarriesEveryField(t *testing.T) {
+	result := DisconnectResult{Connections: 1, Sessions: 1}
+	result.AddUnclosable("hy2", UnclosableQUIC)
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &sent); err != nil {
+		t.Fatal(err)
+	}
+	fields := reflect.TypeFor[DisconnectResult]()
+	for i := range fields.NumField() {
+		name, _, _ := strings.Cut(fields.Field(i).Tag.Get("json"), ",")
+		if _, ok := sent[name]; !ok {
+			t.Errorf("field %s (%q) is not sent: %s", fields.Field(i).Name, name, raw)
+		}
 	}
 }

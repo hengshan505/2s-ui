@@ -1,18 +1,21 @@
 package core
 
 import (
+	"cmp"
 	"encoding/json"
+	"slices"
 
 	"github.com/shenaba/2s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 )
 
 // userKicker is what the protocol copies in core/protocol/ expose in their
 // users.go: a way to reach the session registry from outside the inbound.
-// What it counts as Unclosable is only believed for some inbound types; see
-// unclosableReason.
+// What it counts as Unclosable is only believed for the QUIC types; see
+// quicInbound.
 type userKicker interface {
 	KickUser(user string) usersession.Result
 }
@@ -23,9 +26,8 @@ const (
 	// UnclosableQUIC is a Hysteria, Hysteria2 or TUIC inbound: this layer has no
 	// handle on a QUIC session (see core/usersession).
 	UnclosableQUIC = "quic"
-	// UnclosableMux is a Shadowsocks inbound with multiplex on. Shadowsocks has
-	// no copy in core/protocol/, so its carrier is out of reach; only the service
-	// layer can tell such an inbound apart, and it adds these.
+	// UnclosableMux is a Shadowsocks inbound running with multiplex on.
+	// Shadowsocks has no copy in core/protocol/, so its carrier is out of reach.
 	UnclosableMux = "mux"
 )
 
@@ -38,8 +40,8 @@ type UnclosableInbound struct {
 	Node string `json:"node,omitempty"`
 }
 
-// DisconnectResult is what disconnecting one user managed to do. Its JSON is
-// DisconnectWire's.
+// DisconnectResult is what disconnecting one user managed to do. It is sent as
+// DisconnectWire.
 //
 // There is deliberately no count field. Masters from before the list read only
 // "unclosable", so the wire form still carries one -- derived from the list,
@@ -52,31 +54,30 @@ type DisconnectResult struct {
 	// Sessions counts the multiplex / anytls sessions cut outright.
 	Sessions int `json:"sessions"`
 	// UnclosableInbounds names the inbounds where the user is likely still
-	// connected by a session this layer cannot reach. Their routed connections
-	// are closed, but the client opens new streams on the session it still has.
+	// connected by a session this layer cannot reach, sorted by tag. Their
+	// routed connections are closed, but the client opens new streams on the
+	// session it still has.
 	UnclosableInbounds []UnclosableInbound `json:"unclosableInbounds,omitempty"`
 }
 
-// DisconnectWire is DisconnectResult as it is sent.
+// disconnectFields is DisconnectResult without its methods, so that embedding
+// it carries every field along and not the MarshalJSON below.
+type disconnectFields DisconnectResult
+
+// DisconnectWire is DisconnectResult as it is sent: every field of it, so one
+// added there needs nothing here, plus the count.
 type DisconnectWire struct {
-	Connections int `json:"connections"`
-	Sessions    int `json:"sessions"`
+	disconnectFields
 	// Unclosable is len(UnclosableInbounds), for masters that predate the list:
 	// they read only this count, and warn when it is not zero.
-	Unclosable         int                 `json:"unclosable"`
-	UnclosableInbounds []UnclosableInbound `json:"unclosableInbounds,omitempty"`
+	Unclosable int `json:"unclosable"`
 }
 
-// Wire is r with its count filled in. A type that embeds DisconnectResult and
-// adds fields of its own needs it for a MarshalJSON of its own: the one below
-// would otherwise be promoted and marshal the embedded half alone.
+// Wire is r as it is sent. A type that carries a DisconnectResult next to
+// fields of its own embeds this rather than r: r's MarshalJSON would be
+// promoted and marshal r alone.
 func (r DisconnectResult) Wire() DisconnectWire {
-	return DisconnectWire{
-		Connections:        r.Connections,
-		Sessions:           r.Sessions,
-		Unclosable:         len(r.UnclosableInbounds),
-		UnclosableInbounds: r.UnclosableInbounds,
-	}
+	return DisconnectWire{disconnectFields: disconnectFields(r), Unclosable: len(r.UnclosableInbounds)}
 }
 
 func (r DisconnectResult) MarshalJSON() ([]byte, error) {
@@ -88,21 +89,35 @@ func (r *DisconnectResult) AddUnclosable(tag string, reason string) {
 	r.UnclosableInbounds = append(r.UnclosableInbounds, UnclosableInbound{Tag: tag, Reason: reason})
 }
 
-// unclosableReason says why an inbound of this type can keep a session that a
-// kick cannot cut, or "" when it cannot.
+// quicInbound says whether an inbound of this type can keep a session that a
+// kick cannot cut because it is QUIC.
 //
-// Only the QUIC inbounds can. anytls and the mux protocols hold the transport
-// of every session they could have, so whatever their registry counts on a kick
-// is a stray stream that reached the router after its session had ended -- one
-// that landed in the seen set, which a kick never clears. Deciding by type here,
-// rather than trusting each copy to leave such strays out of its KickUser,
-// is what keeps one from being reported as a QUIC session on every later kick.
-func unclosableReason(inboundType string) string {
+// Only these can, of the inbounds with a registry. anytls and the mux
+// protocols hold the transport of every session they could have, so whatever
+// their registry counts on a kick is a stray stream that reached the router
+// after its session had ended -- one that landed in the seen set, which a kick
+// never clears. Deciding by type here, rather than trusting each copy to leave
+// such strays out of its KickUser, is what keeps one from being reported as a
+// QUIC session on every later kick.
+func quicInbound(inboundType string) bool {
 	switch inboundType {
 	case C.TypeHysteria, C.TypeHysteria2, C.TypeTUIC:
-		return UnclosableQUIC
+		return true
 	}
-	return ""
+	return false
+}
+
+// shadowsocksMultiplex says whether options, the ones a Shadowsocks inbound
+// was created with, turn multiplex on. That a client may use multiplex is not
+// that it does, so a report built on it can over-warn.
+func shadowsocksMultiplex(options any) bool {
+	switch o := options.(type) {
+	case *option.ShadowsocksInboundOptions:
+		return o != nil && o.Multiplex != nil && o.Multiplex.Enabled
+	case option.ShadowsocksInboundOptions:
+		return o.Multiplex != nil && o.Multiplex.Enabled
+	}
+	return false
 }
 
 // userConns is the part of ConnTracker a kick uses.
@@ -118,19 +133,16 @@ type userConns interface {
 // else on the inbound too -- a price a removal pays, but not a button that is
 // meant for looking at one client. UnclosableInbounds says where that limit
 // was hit.
-//
-// live maps each inbound the user had routed connections on to its type, for
-// the caller to look for what only it can recognise among them.
-func (c *Core) DisconnectUser(user string) (result DisconnectResult, live map[string]string, err error) {
+func (c *Core) DisconnectUser(user string) (DisconnectResult, error) {
 	box, err := c.running()
 	if err != nil {
-		return result, nil, err
+		return DisconnectResult{}, err
 	}
-	result, live = disconnect(box.ConnTracker(), box.Inbound().Inbounds(), user)
-	return result, live, nil
+	return disconnect(box.ConnTracker(), box.Inbound().Inbounds(), user, box.inbound.options), nil
 }
 
-// disconnect is DisconnectUser on a given tracker and inbound list.
+// disconnect is DisconnectUser on a given tracker and inbound list. optionsOf
+// returns what an inbound was created with.
 //
 // An inbound is reported only when the user had a routed connection on it a
 // moment ago. For QUIC the registry knows only that the user has been seen on
@@ -138,10 +150,14 @@ func (c *Core) DisconnectUser(user string) (result DisconnectResult, live map[st
 // kick: one connection to a QUIC inbound used to make every later kick warn
 // about it for as long as the inbound lived, and the warning tells the
 // operator to disable the client (#234). The price is the opposite miss -- a
-// QUIC session with no stream open at this instant goes unreported. For a kick
+// session with no stream open at this instant goes unreported. For a kick
 // that is the cheap side: the client may reconnect at once anyway, so the
 // session it keeps buys it nothing it could not get back.
-func disconnect(conns userConns, inbounds []adapter.Inbound, user string) (DisconnectResult, map[string]string) {
+//
+// Both reasons are judged on the running core -- the inbound's type and the
+// options it was built from -- not on the database, which may already hold an
+// edit whose restart is still pending.
+func disconnect(conns userConns, inbounds []adapter.Inbound, user string, optionsOf func(tag string) any) DisconnectResult {
 	var result DisconnectResult
 	// Routed connections first, in the one pass that also records which
 	// inbounds they were on. That record is the only sign of where the user is
@@ -152,22 +168,23 @@ func disconnect(conns userConns, inbounds []adapter.Inbound, user string) (Disco
 	closed, on := conns.CloseConnByUser(user)
 	result.Connections = closed
 
-	live := make(map[string]string, len(on))
 	for _, inbound := range inbounds {
 		tag := inbound.Tag()
 		_, wasOn := on[tag]
-		if wasOn {
-			live[tag] = inbound.Type()
-		}
-		kicker, ok := inbound.(userKicker)
-		if !ok {
+		if kicker, ok := inbound.(userKicker); ok {
+			r := kicker.KickUser(user)
+			result.Sessions += r.Cut
+			if r.Unclosable > 0 && wasOn && quicInbound(inbound.Type()) {
+				result.AddUnclosable(tag, UnclosableQUIC)
+			}
 			continue
 		}
-		r := kicker.KickUser(user)
-		result.Sessions += r.Cut
-		if reason := unclosableReason(inbound.Type()); r.Unclosable > 0 && reason != "" && wasOn {
-			result.AddUnclosable(tag, reason)
+		if wasOn && inbound.Type() == C.TypeShadowsocks && shadowsocksMultiplex(optionsOf(tag)) {
+			result.AddUnclosable(tag, UnclosableMux)
 		}
 	}
-	return result, live
+	slices.SortFunc(result.UnclosableInbounds, func(a, b UnclosableInbound) int {
+		return cmp.Compare(a.Tag, b.Tag)
+	})
+	return result
 }

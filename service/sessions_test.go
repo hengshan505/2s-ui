@@ -30,33 +30,6 @@ func installSessionsDB(t *testing.T) {
 	})
 }
 
-// Only Shadowsocks with multiplex on keeps a carrier the core cannot reach;
-// the copied protocols cut theirs, and a node replica is not on this core.
-func TestMuxCarriers(t *testing.T) {
-	installSessionsDB(t)
-	db := database.GetDB()
-	nodeID := uint(1)
-	for _, in := range []model.Inbound{
-		{Type: "shadowsocks", Tag: "ss-mux", Options: json.RawMessage(`{"multiplex":{"enabled":true}}`)},
-		{Type: "shadowsocks", Tag: "ss-mux-off", Options: json.RawMessage(`{"multiplex":{"enabled":false}}`)},
-		{Type: "shadowsocks", Tag: "ss-plain", Options: json.RawMessage(`{"method":"aes-128-gcm"}`)},
-		{Type: "vless", Tag: "vless-mux", Options: json.RawMessage(`{"multiplex":{"enabled":true}}`)},
-		{Type: "shadowsocks", Tag: "ss-replica", NodeId: &nodeID, Options: json.RawMessage(`{"multiplex":{"enabled":true}}`)},
-	} {
-		if err := db.Create(&in).Error; err != nil {
-			t.Fatalf("create %s: %v", in.Tag, err)
-		}
-	}
-
-	all := []string{"ss-mux", "ss-mux-off", "ss-plain", "vless-mux", "ss-replica", "missing"}
-	if got := muxCarriers(all); !reflect.DeepEqual(got, []string{"ss-mux"}) {
-		t.Errorf("muxCarriers = %v, want [ss-mux]", got)
-	}
-	if got := muxCarriers(nil); got != nil {
-		t.Errorf("muxCarriers(nil) = %v", got)
-	}
-}
-
 // A node's inbounds are labelled with the node, on a copy. An older node's
 // bare count never reaches here: decoding drops it (TestDisconnectClusterUserMerge).
 func TestNodeUnclosable(t *testing.T) {

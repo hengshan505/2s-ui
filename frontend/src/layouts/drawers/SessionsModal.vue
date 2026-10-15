@@ -231,12 +231,12 @@ const disconnect = async () => {
   const r = msg.obj ?? {}
   const left: Uncut[] = r.unclosableInbounds ?? []
   push.success({ message: i18n.global.t('ui.sessDisconnected', { name, n: (r.connections ?? 0) + (r.sessions ?? 0) }) })
-  if (r.localError) push.error({ message: i18n.global.t('ui.sessLocalError', { err: r.localError }) })
+  if (r.localError) push.error({ message: i18n.global.t('ui.sessLocalError', { name, err: r.localError }) })
   // A toast as well as the list: the list sits at the top of a body the
   // operator may have scrolled far from to reach the button.
   if (left.length > 0) push.warning({ message: i18n.global.t('ui.sessUnclosableToast', { name, n: left.length }) })
   for (const [node, err] of Object.entries(r.errors ?? {})) {
-    push.error({ message: i18n.global.t('ui.sessNodeError', { node, err }) })
+    push.error({ message: i18n.global.t('ui.sessDisconnectNodeError', { name, node, err }) })
   }
   if (!current) return
   uncut.value = left

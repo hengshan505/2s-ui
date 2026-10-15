@@ -244,6 +244,15 @@ func (t *componentTable[T]) get(tag string) (T, bool) {
 	return it, found
 }
 
+// options is what tag was created with, for asking about its configuration as
+// it runs -- the database row may already say something else. Nil for a tag
+// the table does not hold.
+func (t *componentTable[T]) options(tag string) any {
+	t.access.RLock()
+	defer t.access.RUnlock()
+	return t.recipes[tag].options
+}
+
 func (t *componentTable[T]) create(r recipe) error {
 	t.mutate.Lock()
 	defer t.mutate.Unlock()

@@ -10,10 +10,7 @@ import (
 	"github.com/shenaba/2s-ui/core"
 	"github.com/shenaba/2s-ui/database"
 	"github.com/shenaba/2s-ui/database/model"
-	"github.com/shenaba/2s-ui/logger"
 	"github.com/shenaba/2s-ui/util/common"
-
-	C "github.com/sagernet/sing-box/constant"
 )
 
 // SessionsResult is a live-connections listing. Errors names the nodes that
@@ -199,25 +196,16 @@ func enabledNodes(ids []uint) ([]*model.Node, error) {
 	return nodes, err
 }
 
-// DisconnectResult adds what went wrong to the merged result: the nodes that
+// DisconnectResult is the merged answer, plus what went wrong: the nodes that
 // could not be told, and this panel's own failure when nodes were asked too.
 //
-// Its JSON is MarshalJSON's, so a field added here has to be added there too.
+// It embeds core.DisconnectWire rather than core.DisconnectResult: that one's
+// MarshalJSON would be promoted and marshal it alone. Embedding the wire form
+// sends every field of both with no marshaller here to keep in step.
 type DisconnectResult struct {
-	core.DisconnectResult
-	Errors     map[string]string
-	LocalError string
-}
-
-// MarshalJSON is needed for Errors and LocalError to be sent at all: without it
-// the embedded core.DisconnectResult's MarshalJSON is promoted and marshals the
-// core half alone.
-func (r DisconnectResult) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		core.DisconnectWire
-		Errors     map[string]string `json:"errors,omitempty"`
-		LocalError string            `json:"localError,omitempty"`
-	}{r.Wire(), r.Errors, r.LocalError})
+	core.DisconnectWire
+	Errors     map[string]string `json:"errors,omitempty"`
+	LocalError string            `json:"localError,omitempty"`
 }
 
 // DisconnectLocalUser drops one user's live connections on this panel only.
@@ -228,67 +216,7 @@ func DisconnectLocalUser(user string) (core.DisconnectResult, error) {
 	if corePtr == nil {
 		return core.DisconnectResult{}, common.NewError("sing-box is not running")
 	}
-	return disconnectLocal(user)
-}
-
-// disconnectLocal kicks user off this panel's core, adding to the report the
-// multiplexed Shadowsocks inbounds the user was on. Shadowsocks has no copy in
-// core/protocol/, so its mux carrier is out of the core's reach: closing the
-// routed streams leaves the client opening new ones on the carrier it still
-// has -- the same limit the QUIC inbounds report.
-//
-// The inbounds are the ones the core saw the user on just before the kick. That
-// a client may use multiplex is not that it does, so this can over-warn; it
-// cannot see a carrier with no stream open on it either. A routed connection is
-// the only evidence there is. Only the Shadowsocks ones among them are looked
-// up, so a client on none costs no query.
-//
-// The report is sorted here rather than by the cluster merge alone, so that it
-// reads the same with no node to merge, and arrives sorted at a master.
-func disconnectLocal(user string) (core.DisconnectResult, error) {
-	result, live, err := corePtr.DisconnectUser(user)
-	if err != nil {
-		return result, err
-	}
-	var shadowsocks []string
-	for tag, inboundType := range live {
-		if inboundType == C.TypeShadowsocks {
-			shadowsocks = append(shadowsocks, tag)
-		}
-	}
-	for _, tag := range muxCarriers(shadowsocks) {
-		result.AddUnclosable(tag, core.UnclosableMux)
-	}
-	sortUnclosable(result.UnclosableInbounds)
-	return result, nil
-}
-
-// muxCarriers returns the local Shadowsocks inbounds among tags that have
-// multiplex enabled, sorted.
-func muxCarriers(tags []string) []string {
-	if len(tags) == 0 {
-		return nil
-	}
-	var inbounds []model.Inbound
-	err := database.GetDB().Model(model.Inbound{}).Select("tag", "options").
-		Where("type = ? AND tag IN ? AND node_id IS NULL", C.TypeShadowsocks, tags).
-		Order("tag").Find(&inbounds).Error
-	if err != nil {
-		logger.Warning("disconnect: read inbounds: ", err)
-		return nil
-	}
-	var carriers []string
-	for _, inbound := range inbounds {
-		var options struct {
-			Multiplex *struct {
-				Enabled bool `json:"enabled"`
-			} `json:"multiplex"`
-		}
-		if json.Unmarshal(inbound.Options, &options) == nil && options.Multiplex != nil && options.Multiplex.Enabled {
-			carriers = append(carriers, inbound.Tag)
-		}
-	}
-	return carriers
+	return corePtr.DisconnectUser(user)
 }
 
 // nodeUnclosable labels the inbounds a node could not cut with the node's name.
@@ -337,23 +265,24 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 	if user == "" {
 		return DisconnectResult{}, common.NewError("empty user name")
 	}
-	var result DisconnectResult
+	var merged core.DisconnectResult
 	var localErr error
 	localRunning := corePtr != nil && corePtr.IsRunning()
 	if localRunning {
-		result.DisconnectResult, localErr = disconnectLocal(user)
+		merged, localErr = corePtr.DisconnectUser(user)
 	}
 
 	nodes, err := onlineNodes()
 	if err != nil {
-		return result, err
+		return DisconnectResult{DisconnectWire: merged.Wire()}, err
 	}
 	if len(nodes) == 0 {
 		if !localRunning {
-			return result, common.NewError("sing-box is not running")
+			return DisconnectResult{}, common.NewError("sing-box is not running")
 		}
-		return result, localErr
+		return DisconnectResult{DisconnectWire: merged.Wire()}, localErr
 	}
+	var result DisconnectResult
 	if localErr != nil {
 		result.LocalError = localErr.Error()
 	}
@@ -370,10 +299,11 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 			return remote, err
 		},
 		func(n *model.Node, remote core.DisconnectResult) {
-			result.Connections += remote.Connections
-			result.Sessions += remote.Sessions
-			result.UnclosableInbounds = append(result.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
+			merged.Connections += remote.Connections
+			merged.Sessions += remote.Sessions
+			merged.UnclosableInbounds = append(merged.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
 		})
-	sortUnclosable(result.UnclosableInbounds)
+	sortUnclosable(merged.UnclosableInbounds)
+	result.DisconnectWire = merged.Wire()
 	return result, nil
 }
