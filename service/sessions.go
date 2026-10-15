@@ -2,7 +2,9 @@ package service
 
 import (
 	"encoding/json"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -226,14 +228,18 @@ func DisconnectLocalUser(user string) (core.DisconnectResult, error) {
 // a client may use multiplex is not that it does, so this can over-warn; it
 // cannot see a carrier with no stream open on it either. A routed connection is
 // the only evidence there is.
+//
+// The report is sorted here rather than by the cluster merge alone, so that it
+// reads the same with no node to merge, and arrives sorted at a master.
 func disconnectLocal(user string) (core.DisconnectResult, error) {
-	result, err := corePtr.DisconnectUser(user)
+	result, live, err := corePtr.DisconnectUser(user)
 	if err != nil {
 		return result, err
 	}
-	for _, tag := range muxCarriers(result.LiveInbounds) {
+	for _, tag := range muxCarriers(slices.Collect(maps.Keys(live))) {
 		result.AddUnclosable(tag, core.UnclosableMux)
 	}
+	sortUnclosable(result.UnclosableInbounds)
 	return result, nil
 }
 
@@ -267,20 +273,17 @@ func muxCarriers(tags []string) []string {
 
 // nodeUnclosable labels the inbounds a node could not cut with the node's name.
 //
-// A node from before per-inbound reports sends the count alone -- one the bug
-// fixed with them (#234) can inflate. It still becomes one entry, naming the
-// node and no inbound, so the warning it used to raise is not silently lost.
+// A node from before per-inbound reports sends a count and no list, and that
+// count is dropped. It comes from the registry's seen set alone -- the signal
+// #234 found too weak for a kick -- so a warning built from it cannot be told
+// from a false one, and a false one asks the operator to disable a client for
+// nothing. Missing a real one costs little: a kick lets the client straight
+// back in anyway. Such a node warns again once it is upgraded.
 func nodeUnclosable(node string, remote core.DisconnectResult) []core.UnclosableInbound {
-	if len(remote.UnclosableInbounds) == 0 {
-		if remote.Unclosable > 0 {
-			return []core.UnclosableInbound{{Reason: core.UnclosableUnreported, Node: node}}
-		}
-		return nil
-	}
-	labelled := make([]core.UnclosableInbound, len(remote.UnclosableInbounds))
-	for i, u := range remote.UnclosableInbounds {
+	labelled := make([]core.UnclosableInbound, 0, len(remote.UnclosableInbounds))
+	for _, u := range remote.UnclosableInbounds {
 		u.Node = node
-		labelled[i] = u
+		labelled = append(labelled, u)
 	}
 	return labelled
 }
@@ -351,8 +354,8 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 			result.UnclosableInbounds = append(result.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
 		})
 	sortUnclosable(result.UnclosableInbounds)
-	// Recounted rather than summed: an older node's count stands for an
-	// unknown number of inbounds, and its whole report is one entry here.
+	// Recounted rather than summed: an older node's count is dropped, see
+	// nodeUnclosable.
 	result.Unclosable = len(result.UnclosableInbounds)
 	return result, nil
 }

@@ -18,7 +18,7 @@
       <!-- What the last Disconnect could not cut. It stays until the next one or
            until the modal closes: a refresh lists routed connections, and these
            sessions are the part a listing cannot show. -->
-      <div v-if="uncut.length" class="sess-warn">
+      <div v-if="uncut.length" ref="uncutBox" class="sess-warn">
         {{ $t('ui.sessUnclosable') }}
         <ul class="sess-uncut">
           <!-- Each part isolated: a Latin tag next to an RTL reason would
@@ -115,7 +115,7 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { push } from 'notivue'
 import HttpUtils from '@/plugins/httputil'
 import { HumanReadable } from '@/plugins/utils'
@@ -149,10 +149,9 @@ type Session = {
   node?: string
 }
 
-// One inbound a Disconnect left a session on (core.UnclosableInbound). tag is
-// empty for a node too old to say which inbounds.
+// One inbound a Disconnect left a session on (core.UnclosableInbound).
 type Uncut = {
-  tag?: string
+  tag: string
   reason: string
   node?: string
 }
@@ -169,6 +168,7 @@ const closing = ref(false)
 const sessions = ref<Session[]>([])
 const errors = ref<Record<string, string>>({})
 const uncut = ref<Uncut[]>([])
+const uncutBox = ref<HTMLElement | null>(null)
 const shown = computed(() => sessions.value.slice(0, MAX_ROWS))
 const hasNodes = computed(() => sessions.value.some((s) => s.node) || Object.keys(errors.value).length > 0)
 const uncutNodes = computed(() => hasNodes.value || uncut.value.some((u) => u.node))
@@ -177,14 +177,13 @@ const uncutReason = (reason: string): string => {
   switch (reason) {
     case 'quic': return i18n.global.t('ui.sessUncutQuic')
     case 'mux': return i18n.global.t('ui.sessUncutMux')
-    case 'unreported': return i18n.global.t('ui.sessUncutUnreported')
     // A newer node's reason this panel has no words for: still better shown.
     default: return reason
   }
 }
 const uncutParts = (u: Uncut): string[] => [
   uncutNodes.value ? (u.node || i18n.global.t('ui.sessLocal')) : '',
-  u.tag ?? '',
+  u.tag,
   uncutReason(u.reason),
 ].filter((v) => v)
 
@@ -215,20 +214,35 @@ const loadData = async () => {
   errors.value = msg.success ? (msg.obj?.errors ?? {}) : {}
 }
 
+// The same guard for Disconnect, whose reply belongs to the modal it was sent
+// from. Closing bumps it, so a late reply cannot put one client's list on the
+// next client's modal. Its toasts still fire: the disconnect did happen.
+let kicks = 0
 const disconnect = async () => {
+  const seq = ++kicks
   closing.value = true
   uncut.value = []
   const msg = await HttpUtils.post('api/closeSessions', { u: props.name })
-  closing.value = false
+  const current = seq === kicks
+  if (current) closing.value = false
   if (!msg.success) return
   const r = msg.obj ?? {}
+  const left: Uncut[] = r.unclosableInbounds ?? []
   push.success({ message: i18n.global.t('ui.sessDisconnected', { n: (r.connections ?? 0) + (r.sessions ?? 0) }) })
   if (r.localError) push.error({ message: i18n.global.t('ui.sessLocalError', { err: r.localError }) })
-  uncut.value = r.unclosableInbounds ?? []
+  // A toast as well as the list: the list sits at the top of a body the
+  // operator may have scrolled far from to reach the button.
+  if (left.length > 0) push.warning({ message: i18n.global.t('ui.sessUnclosableToast', { n: left.length }) })
   for (const [node, err] of Object.entries(r.errors ?? {})) {
     push.error({ message: i18n.global.t('ui.sessNodeError', { node, err }) })
   }
+  if (!current) return
+  uncut.value = left
   loadData()
+  if (left.length > 0) {
+    await nextTick()
+    uncutBox.value?.scrollIntoView({ block: 'nearest' })
+  }
 }
 
 let timer: ReturnType<typeof setInterval> | undefined
@@ -251,6 +265,8 @@ watch(() => props.visible, (open) => {
     loadData()
   } else {
     awaited = ++issued
+    kicks++
+    closing.value = false
     loading.value = false
     loaded.value = false
     sessions.value = []

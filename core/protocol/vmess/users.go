@@ -42,7 +42,7 @@ func (h *Inbound) sessions() *usersession.Registry {
 }
 
 // KickUser cuts the sessions of a user who stays on the inbound -- see
-// Core.DisconnectUser. Unclosable is dropped; see the note in vless/users.go.
+// Core.DisconnectUser.
 func (h *Inbound) KickUser(user string) usersession.Result {
-	return usersession.Result{Cut: h.sessions().KickUserSessions(user).Cut}
+	return h.sessions().KickUserSessions(user)
 }

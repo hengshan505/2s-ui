@@ -56,34 +56,28 @@ func TestMuxCarriers(t *testing.T) {
 }
 
 // A node's inbounds are labelled with the node. One from before per-inbound
-// reports sends only the count, and its warning must not be lost on the way.
+// reports sends only a count, built from the seen set alone (#234); it is
+// dropped rather than shown as a warning nobody could tell from a false one.
 func TestNodeUnclosable(t *testing.T) {
 	current := core.DisconnectResult{}
 	current.AddUnclosable("hy2", core.UnclosableQUIC)
 	current.AddUnclosable("ss", core.UnclosableMux)
 
-	for _, tc := range []struct {
-		name   string
-		remote core.DisconnectResult
-		want   []core.UnclosableInbound
-	}{
-		{"current node", current, []core.UnclosableInbound{
-			{Tag: "hy2", Reason: core.UnclosableQUIC, Node: "n1"},
-			{Tag: "ss", Reason: core.UnclosableMux, Node: "n1"},
-		}},
-		{"older node", core.DisconnectResult{Unclosable: 2}, []core.UnclosableInbound{
-			{Reason: core.UnclosableUnreported, Node: "n1"},
-		}},
-		{"nothing left", core.DisconnectResult{Connections: 4}, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := nodeUnclosable("n1", tc.remote); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("nodeUnclosable = %+v, want %+v", got, tc.want)
-			}
-		})
+	want := []core.UnclosableInbound{
+		{Tag: "hy2", Reason: core.UnclosableQUIC, Node: "n1"},
+		{Tag: "ss", Reason: core.UnclosableMux, Node: "n1"},
+	}
+	if got := nodeUnclosable("n1", current); !reflect.DeepEqual(got, want) {
+		t.Errorf("current node: nodeUnclosable = %+v, want %+v", got, want)
 	}
 	if current.UnclosableInbounds[0].Node != "" {
 		t.Error("nodeUnclosable labelled the node's own slice in place")
+	}
+	if got := nodeUnclosable("n1", core.DisconnectResult{Unclosable: 2}); len(got) != 0 {
+		t.Errorf("older node: nodeUnclosable = %+v, want nothing", got)
+	}
+	if got := nodeUnclosable("n1", core.DisconnectResult{Connections: 4}); len(got) != 0 {
+		t.Errorf("nothing left: nodeUnclosable = %+v, want nothing", got)
 	}
 }
 
@@ -92,7 +86,7 @@ func TestSortUnclosable(t *testing.T) {
 	list := []core.UnclosableInbound{
 		{Tag: "tuic", Node: "b"},
 		{Tag: "ss", Node: ""},
-		{Reason: core.UnclosableUnreported, Node: "a"},
+		{Tag: "ss", Node: "a"},
 		{Tag: "hy2", Node: "b"},
 		{Tag: "hy2", Node: ""},
 	}
@@ -100,7 +94,7 @@ func TestSortUnclosable(t *testing.T) {
 	want := []core.UnclosableInbound{
 		{Tag: "hy2", Node: ""},
 		{Tag: "ss", Node: ""},
-		{Reason: core.UnclosableUnreported, Node: "a"},
+		{Tag: "ss", Node: "a"},
 		{Tag: "hy2", Node: "b"},
 		{Tag: "tuic", Node: "b"},
 	}

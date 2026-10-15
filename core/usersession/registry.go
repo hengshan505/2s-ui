@@ -253,8 +253,8 @@ func (r *Registry) CloseUsers(keep map[string]struct{}) Result {
 //
 // For a QUIC user "known to be connected" is the seen set, which never forgets.
 // That is the right signal for a removal and too weak for a kick, so
-// Core.DisconnectUser passes the report on only for an inbound the user has a
-// routed connection on (#234).
+// Core.DisconnectUser passes the report on only for a QUIC inbound the user
+// has a routed connection on (#234).
 func (r *Registry) KickUserSessions(user string) Result {
 	if user == "" {
 		return Result{}

@@ -8,44 +8,67 @@ import (
 	"github.com/shenaba/2s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 )
 
 // fakeKicker is an inbound with a session registry (fakeInbound is in
 // managers_test.go), answering a kick with a fixed result.
 type fakeKicker struct {
 	fakeInbound
+	typ    string
 	result usersession.Result
+	// onKick, when set, runs as the kick does -- to close what a cut carrier
+	// would take with it.
+	onKick func()
 	kicked []string
 }
 
+func (f *fakeKicker) Type() string { return f.typ }
+
 func (f *fakeKicker) KickUser(user string) usersession.Result {
 	f.kicked = append(f.kicked, user)
+	if f.onKick != nil {
+		f.onKick()
+	}
 	return f.result
 }
 
-// #234: a QUIC registry reports every user it has ever seen on the inbound, so
-// only an inbound the user has a routed connection on may be reported.
-func TestKickInboundsReportsOnlyLiveInbounds(t *testing.T) {
+func kicker(tag string, typ string, result usersession.Result) *fakeKicker {
+	return &fakeKicker{fakeInbound: fakeInbound{name: tag}, typ: typ, result: result}
+}
+
+// What a kick reports, end to end on a real tracker: only a QUIC inbound, and
+// only one the user had a routed connection on before anything was closed.
+func TestDisconnectReportsLiveQUICInbounds(t *testing.T) {
+	tr := NewConnTracker()
+	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "hy2"
+	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "vless"
+	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "anytls"
+	track(tr, "bob", "2.2.2.2", 100, 100, t).Inbound = "tuic"
+
+	// Kicked first, and takes alice's hy2 streams with it: a snapshot read
+	// after the kicks, or after CloseConnByUser, would no longer show hy2.
+	vless := kicker("vless", C.TypeVLESS, usersession.Result{Cut: 1})
+	vless.onKick = func() { tr.CloseConnByInbound("hy2") }
 	// Connected now: reported.
-	hy2 := &fakeKicker{fakeInbound: fakeInbound{name: "hy2"}, result: usersession.Result{Unclosable: 1}}
-	// Seen once, nothing routed now: the false warning this guards against.
-	tuic := &fakeKicker{fakeInbound: fakeInbound{name: "tuic"}, result: usersession.Result{Unclosable: 1}}
-	// A mux carrier cut outright, counted whether or not anything was routed.
-	vless := &fakeKicker{fakeInbound: fakeInbound{name: "vless"}, result: usersession.Result{Cut: 2}}
-	// Live, but with no registry to ask.
+	hy2 := kicker("hy2", C.TypeHysteria2, usersession.Result{Unclosable: 1})
+	// Seen once, nothing routed now -- the false warning of #234.
+	tuic := kicker("tuic", C.TypeTUIC, usersession.Result{Unclosable: 1})
+	// A stray stream left in anytls's seen set: live, but never a session.
+	anytls := kicker("anytls", C.TypeAnyTLS, usersession.Result{Unclosable: 1})
+	// Live, with no registry to ask.
 	plain := &fakeInbound{name: "direct-in"}
 
-	var result DisconnectResult
-	live := map[string]struct{}{"hy2": {}, "vless": {}, "direct-in": {}}
-	kickInbounds(&result, []adapter.Inbound{hy2, tuic, vless, plain}, "alice", live)
+	result, live := disconnect(tr, []adapter.Inbound{vless, hy2, tuic, anytls, plain}, "alice")
 
-	for _, k := range []*fakeKicker{hy2, tuic, vless} {
+	for _, k := range []*fakeKicker{vless, hy2, tuic, anytls} {
 		if !reflect.DeepEqual(k.kicked, []string{"alice"}) {
 			t.Errorf("%s kicked %v, want [alice] -- every registry is asked, live or not", k.name, k.kicked)
 		}
 	}
-	if result.Sessions != 2 {
-		t.Errorf("Sessions = %d, want 2", result.Sessions)
+	wantLive := map[string]struct{}{"hy2": {}, "vless": {}, "anytls": {}}
+	if !reflect.DeepEqual(live, wantLive) {
+		t.Errorf("live = %v, want %v", live, wantLive)
 	}
 	want := []UnclosableInbound{{Tag: "hy2", Reason: UnclosableQUIC}}
 	if !reflect.DeepEqual(result.UnclosableInbounds, want) {
@@ -54,12 +77,39 @@ func TestKickInboundsReportsOnlyLiveInbounds(t *testing.T) {
 	if result.Unclosable != 1 {
 		t.Errorf("Unclosable = %d, want 1 -- it is the list's length", result.Unclosable)
 	}
+	if result.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", result.Sessions)
+	}
+	// vless and anytls; hy2's went with the carrier, bob's are not alice's.
+	if result.Connections != 2 {
+		t.Errorf("Connections = %d, want 2", result.Connections)
+	}
+	if got := tr.UserInbounds("bob"); len(got) != 1 {
+		t.Errorf("bob's connections = %v, want his tuic one left alone", got)
+	}
 }
 
-// The count stays on the wire for masters that predate the list, the list is
-// left out when empty, and the live inbounds are never sent.
+func TestUnclosableReason(t *testing.T) {
+	for typ, want := range map[string]string{
+		C.TypeHysteria:    UnclosableQUIC,
+		C.TypeHysteria2:   UnclosableQUIC,
+		C.TypeTUIC:        UnclosableQUIC,
+		C.TypeAnyTLS:      "",
+		C.TypeVLESS:       "",
+		C.TypeVMess:       "",
+		C.TypeTrojan:      "",
+		C.TypeShadowsocks: "",
+	} {
+		if got := unclosableReason(typ); got != want {
+			t.Errorf("unclosableReason(%s) = %q, want %q", typ, got, want)
+		}
+	}
+}
+
+// The count stays on the wire for masters that predate the list, and the list
+// is left out when empty.
 func TestDisconnectResultJSON(t *testing.T) {
-	result := DisconnectResult{Connections: 3, LiveInbounds: []string{"hy2"}}
+	result := DisconnectResult{Connections: 3}
 	result.AddUnclosable("hy2", UnclosableQUIC)
 	raw, err := json.Marshal(result)
 	if err != nil {
