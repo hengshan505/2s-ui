@@ -62,38 +62,45 @@ func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 	return endpointsJson, nil
 }
 
-func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) error {
-	var err error
-
+// Save writes an endpoint and applies it to the running core. restartCore is
+// as in OutboundService.Save.
+func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (restartCore bool, err error) {
 	switch act {
 	case "new", "edit":
 		var endpoint model.Endpoint
 		err = endpoint.UnmarshalJSON(data)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if endpoint.TlsId > 0 {
 			err = tx.Model(model.Tls{}).Where("id = ?", endpoint.TlsId).Find(&endpoint.Tls).Error
 			if err != nil {
-				return err
+				return false, err
 			}
+		}
+
+		// Before the WARP calls below: registering one creates a device with
+		// Cloudflare, which a refusal here would leave behind.
+		err = tagFreeAcross(tx, model.Endpoint{}, "endpoint", endpoint.Tag, endpoint.Id)
+		if err != nil {
+			return false, err
 		}
 
 		if endpoint.Type == "warp" {
 			if act == "new" {
 				err = s.WarpService.RegisterWarp(&endpoint)
 				if err != nil {
-					return err
+					return false, err
 				}
 			} else {
 				var old_license string
 				err = tx.Model(model.Endpoint{}).Select("json_extract(ext, '$.license_key')").Where("id = ?", endpoint.Id).Find(&old_license).Error
 				if err != nil {
-					return err
+					return false, err
 				}
 				err = s.WarpService.SetWarpLicense(old_license, &endpoint)
 				if err != nil {
-					return err
+					return false, err
 				}
 			}
 		}
@@ -101,75 +108,100 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) er
 		if corePtr.IsRunning() {
 			configData, err := endpoint.MarshalJSON()
 			if err != nil {
-				return err
+				return false, err
 			}
+			var old model.Endpoint
 			if act == "edit" {
-				var oldTag string
-				err = tx.Model(model.Endpoint{}).Select("tag").Where("id = ?", endpoint.Id).Find(&oldTag).Error
+				err = tx.Model(model.Endpoint{}).Preload("Tls").Where("id = ?", endpoint.Id).Find(&old).Error
 				if err != nil {
-					return err
-				}
-				err = corePtr.RemoveEndpoint(oldTag)
-				if err != nil && err != os.ErrInvalid {
-					return err
+					return false, err
 				}
 			}
-			err = corePtr.AddEndpoint(configData)
-			if err != nil {
-				return err
+			oldTag := old.Tag
+			if act == "edit" && oldTag == endpoint.Tag && sameConfig(old.MarshalJSON, configData) && corePtr.HasEndpoint(oldTag) {
+				// Saved as it was, or with only panel-side fields changed:
+				// as in OutboundService.Save, nothing for the core to do.
+			} else if act == "edit" && oldTag == endpoint.Tag && len(corePtr.EndpointDependents(oldTag)) > 0 {
+				// As in OutboundService.Save: applied by a restart after the
+				// commit, vetted now. A listen port another socket holds
+				// still only shows on the restart.
+				err = corePtr.ValidateEndpoint(configData)
+				if err != nil {
+					return false, err
+				}
+				restartCore = true
+			} else if act == "edit" && oldTag != endpoint.Tag {
+				// See InboundService.Save.
+				err = corePtr.RenameEndpoint(oldTag, configData)
+				if err != nil {
+					return false, err
+				}
+			} else {
+				err = corePtr.AddEndpoint(configData)
+				if err != nil {
+					return false, err
+				}
 			}
 		}
 
 		err = tx.Save(&endpoint).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 	case "del":
 		var tag string
 		err = json.Unmarshal(data, &tag)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if corePtr.IsRunning() {
 			err = corePtr.RemoveEndpoint(tag)
 			if err != nil && err != os.ErrInvalid {
-				return err
+				return false, err
 			}
 		}
 		err = tx.Where("tag = ?", tag).Delete(model.Endpoint{}).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 	default:
-		return common.NewErrorf("unknown action: %s", act)
+		return false, common.NewErrorf("unknown action: %s", act)
 	}
-	return nil
+	return restartCore, nil
 }
 
 // RestartEndpoints reloads the given endpoints in a running core, so a change
 // to the TLS config they reference takes effect without restarting the panel.
-func (s *EndpointService) RestartEndpoints(tx *gorm.DB, ids []uint) error {
+//
+// Each is replaced in place, so a certificate that does not load leaves the
+// old one running (core/managers.go). One that a selector or urltest uses
+// cannot be: they resolved it at start and would keep the closed instance, and
+// refusing would refuse the certificate change with it. For those restartCore
+// asks the caller to restart the core once the change is committed -- rare
+// enough (a certificate on an endpoint in a group) to be worth the dropped
+// connections over a group silently dialing a closed endpoint.
+func (s *EndpointService) RestartEndpoints(tx *gorm.DB, ids []uint) (restartCore bool, err error) {
 	if !corePtr.IsRunning() {
-		return nil
+		return false, nil
 	}
 	var endpoints []*model.Endpoint
-	err := tx.Model(model.Endpoint{}).Preload("Tls").Where("id in ?", ids).Find(&endpoints).Error
+	err = tx.Model(model.Endpoint{}).Preload("Tls").Where("id in ?", ids).Find(&endpoints).Error
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, endpoint := range endpoints {
-		err = corePtr.RemoveEndpoint(endpoint.Tag)
-		if err != nil && err != os.ErrInvalid {
-			return err
+		if len(corePtr.EndpointDependents(endpoint.Tag)) > 0 {
+			restartCore = true
+			continue
 		}
 		endpointConfig, err := endpoint.MarshalJSON()
 		if err != nil {
-			return err
+			return false, err
 		}
 		err = corePtr.AddEndpoint(endpointConfig)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return restartCore, nil
 }

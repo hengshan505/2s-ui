@@ -630,9 +630,11 @@ func (a *ApiService) SetMaintenance(c *gin.Context) {
 }
 
 func (a *ApiService) ResetTraffic(c *gin.Context) {
-	inboundIds, err := a.ClientService.ResetAllClientsTraffic(nil)
-	if err != nil {
-		jsonMsg(c, "resetTraffic", err)
+	resetErr, coreErr := a.ConfigService.ResetTraffic(func() ([]uint, error) {
+		return a.ClientService.ResetAllClientsTraffic(nil)
+	})
+	if resetErr != nil {
+		jsonMsg(c, "resetTraffic", resetErr)
 		return
 	}
 	// The reset re-enables depleted clients. DepleteJob fanned the disable out
@@ -640,7 +642,7 @@ func (a *ApiService) ResetTraffic(c *gin.Context) {
 	// paid-up users until the hourly safety net.
 	a.NodeSyncService.MarkAllDirty()
 	go a.NodeSyncService.ReconcileDirtyOnline()
-	jsonMsg(c, "resetTraffic", a.ConfigService.ApplyReenabledUsers(inboundIds))
+	jsonMsg(c, "resetTraffic", coreErr)
 }
 
 func (a *ApiService) LinkConvert(c *gin.Context) {

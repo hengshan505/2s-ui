@@ -33,9 +33,8 @@ func (l *recordingLogger) TraceContext(context.Context, ...any)        {}
 // seconds names nothing anyone can act on.
 func TestCloseGuardedReportsPanicWithStack(t *testing.T) {
 	logger := &recordingLogger{}
-	box := &Box{logger: logger}
 
-	err := box.closeGuarded("boom", func() error { panic("kaboom") })
+	err := closeGuarded(logger, "boom", func() error { panic("kaboom") })
 
 	if err == nil {
 		t.Fatal("a panic must come back as an error, not escape")
@@ -58,16 +57,15 @@ func TestCloseGuardedReportsPanicWithStack(t *testing.T) {
 // The ordinary path stays ordinary: no panic, the error comes straight back.
 func TestCloseGuardedPassesErrorsThrough(t *testing.T) {
 	logger := &recordingLogger{}
-	box := &Box{logger: logger}
 
 	want := fmt.Errorf("listener already closed")
-	if err := box.closeGuarded("inbound", func() error { return want }); err != want {
+	if err := closeGuarded(logger, "inbound", func() error { return want }); err != want {
 		t.Errorf("close error must come back unchanged, got %v", err)
 	}
 	if len(logger.errors) != 0 {
 		t.Errorf("a plain error is the caller's to report, got %v", logger.errors)
 	}
-	if err := box.closeGuarded("inbound", func() error { return nil }); err != nil {
+	if err := closeGuarded(logger, "inbound", func() error { return nil }); err != nil {
 		t.Errorf("a clean close must report nothing, got %v", err)
 	}
 }

@@ -78,23 +78,29 @@ func (s *ServicesService) Save(tx *gorm.DB, act string, data json.RawMessage) er
 			}
 		}
 
+		err = tagFree(tx, model.Service{}, "service", srv.Tag, srv.Id)
+		if err != nil {
+			return err
+		}
+
 		if corePtr.IsRunning() {
 			configData, err := srv.MarshalJSON()
 			if err != nil {
 				return err
 			}
+			var oldTag string
 			if act == "edit" {
-				var oldTag string
 				err = tx.Model(model.Service{}).Select("tag").Where("id = ?", srv.Id).Find(&oldTag).Error
 				if err != nil {
 					return err
 				}
-				err = corePtr.RemoveService(oldTag)
-				if err != nil && err != os.ErrInvalid {
-					return err
-				}
 			}
-			err = corePtr.AddService(configData)
+			// See InboundService.Save.
+			if act == "edit" && oldTag != srv.Tag {
+				err = corePtr.RenameService(oldTag, configData)
+			} else {
+				err = corePtr.AddService(configData)
+			}
 			if err != nil {
 				return err
 			}
@@ -136,10 +142,8 @@ func (s *ServicesService) RestartServices(tx *gorm.DB, ids []uint) error {
 		return err
 	}
 	for _, srv := range services {
-		err = corePtr.RemoveService(srv.Tag)
-		if err != nil && err != os.ErrInvalid {
-			return err
-		}
+		// Replaced in place rather than removed first: a certificate that
+		// does not load then leaves the old one running (core/managers.go).
 		srvConfig, err := srv.MarshalJSON()
 		if err != nil {
 			return err

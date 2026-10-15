@@ -113,7 +113,10 @@ func stopCoreForExec() {
 	if corePtr == nil {
 		return
 	}
-	if err := (&ConfigService{}).StopCore(); err != nil {
+	// Same as a shutdown: the exec leaves no next flush for what the core has
+	// counted since the last one.
+	FlushStats()
+	if err := (&ConfigService{}).RetireCore(); err != nil {
 		logger.Warning("stop core before in-place restart: ", err)
 	}
 }
@@ -125,6 +128,7 @@ func startCoreAfterFailedExec() {
 	if corePtr == nil {
 		return
 	}
+	coreRetired.Store(false)
 	if err := (&ConfigService{}).StartCore(); err != nil {
 		logger.Error("restore core after failed in-place restart: ", err)
 	}

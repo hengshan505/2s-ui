@@ -17,18 +17,26 @@ func NewDepleteJob() *DepleteJob {
 }
 
 func (s *DepleteJob) Run() {
-	inboundIds, enableChanged, err := s.ClientService.DepleteClients()
+	var enableChanged []string
+	var err error
+	// Held so that a restart cannot fall between the two: one that read its
+	// config before the commit would come up with the depleted clients still
+	// enabled, and the hot update below would have skipped the core.
+	service.HoldCore(func() {
+		var inboundIds []uint
+		inboundIds, enableChanged, err = s.ClientService.DepleteClients()
+		if err != nil || len(inboundIds) == 0 {
+			return
+		}
+		// UpdateInboundsUsers already filters to node_id IS NULL — only local
+		// inbounds are touched here.
+		if err := s.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIds); err != nil {
+			logger.Error("unable to update inbound users: ", err)
+		}
+	})
 	if err != nil {
 		logger.Warning("Disable depleted users failed: ", err)
 		return
-	}
-	if len(inboundIds) > 0 {
-		// UpdateInboundsUsers already filters to node_id IS NULL — only local
-		// inbounds are touched here.
-		err := s.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIds)
-		if err != nil {
-			logger.Error("unable to update inbound users: ", err)
-		}
 	}
 	// Fan the new enable state out to nodes: reconcile sees it in the expected
 	// set and pushes an edit; the node then hot-restarts and drops (or readmits)

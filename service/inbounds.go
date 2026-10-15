@@ -142,18 +142,26 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			}
 			oldTag = old.Tag
 		}
+		err = tagFreeAcross(tx, model.Inbound{}, "inbound", inbound.Tag, inbound.Id)
+		if err != nil {
+			return err
+		}
 
 		// Node replicas only ever touch the DB: never the local core (their
 		// ports live on the node) and never FillOutJson (their OutJson is the
 		// node-side link snapshot, host = the node).
-		if inbound.NodeId == nil && corePtr.IsRunning() {
-			if act == "edit" {
-				err = corePtr.RemoveInbound(oldTag)
-				if err != nil && err != os.ErrInvalid {
-					return err
-				}
+		//
+		// FillOutJson first: it needs nothing from the core, and it can fail
+		// (an out_json that is not an object), which after the core had been
+		// changed left it on a config the save then rolled back.
+		if inbound.NodeId == nil {
+			err = util.FillOutJson(&inbound, hostname)
+			if err != nil {
+				return err
 			}
+		}
 
+		if inbound.NodeId == nil && corePtr.IsRunning() {
 			inboundConfig, err := inbound.MarshalJSON()
 			if err != nil {
 				return err
@@ -168,14 +176,15 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 				return err
 			}
 
-			err = corePtr.AddInbound(inboundConfig)
-			if err != nil {
-				return err
+			// Replaced in place, or renamed in place: either way one that
+			// fails to start brings the old one back (core/managers.go).
+			// Removing it first left nothing running while the failed save
+			// rolled the row back.
+			if act == "edit" && oldTag != inbound.Tag {
+				err = corePtr.RenameInbound(oldTag, inboundConfig)
+			} else {
+				err = corePtr.AddInbound(inboundConfig)
 			}
-		}
-
-		if inbound.NodeId == nil {
-			err = util.FillOutJson(&inbound, hostname)
 			if err != nil {
 				return err
 			}
@@ -502,7 +511,12 @@ func (s *InboundService) UpdateInboundsUsers(tx *gorm.DB, ids []uint) error {
 			continue
 		}
 
-		// Fallback: full restart for protocols without in-place user updates
+		// Fallback: full restart for protocols without in-place user updates.
+		//
+		// Removed first, unlike RestartInbounds: a replacement that fails is
+		// restored from the old recipe -- the old user list, the user this
+		// update removed or depleted included. Here failing closed (the
+		// inbound down) is the safe side, as the comment above says.
 		err = corePtr.RemoveInbound(inbound.Tag)
 		if err != nil && err != os.ErrInvalid {
 			return err
@@ -530,15 +544,6 @@ func (s *InboundService) RestartInbounds(tx *gorm.DB, ids []uint) error {
 		return err
 	}
 	for _, inbound := range inbounds {
-		err = corePtr.RemoveInbound(inbound.Tag)
-		if err != nil && err != os.ErrInvalid {
-			return err
-		}
-		// Close all existing connections
-		if tracker := liveConnTracker(); tracker != nil {
-			tracker.CloseConnByInbound(inbound.Tag)
-		}
-
 		inboundConfig, err := inbound.MarshalJSON()
 		if err != nil {
 			return err
@@ -547,9 +552,16 @@ func (s *InboundService) RestartInbounds(tx *gorm.DB, ids []uint) error {
 		if err != nil {
 			return err
 		}
+		// Replaced in place rather than removed first: a certificate that
+		// does not load then leaves the old one running (core/managers.go).
 		err = corePtr.AddInbound(inboundConfig)
 		if err != nil {
 			return err
+		}
+		// Then close what the old one accepted: closing a listener does not
+		// close its connections, and a removed user's must go.
+		if tracker := liveConnTracker(); tracker != nil {
+			tracker.CloseConnByInbound(inbound.Tag)
 		}
 	}
 	return nil

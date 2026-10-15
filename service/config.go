@@ -27,13 +27,36 @@ var (
 	// them, so a caller can tell whether its own run marked anything --
 	// comparing lastUpdate cannot, since two writers landing in the same second
 	// store the same unix value.
-	lastUpdate          atomic.Int64
-	lastUpdateSeq       atomic.Int64
-	corePtr             *core.Core
-	startCoreMu         sync.Mutex
-	startCoreInProgress bool
-	lastStartFailTime   time.Time
-	startCooldown       = 15 * time.Second
+	lastUpdate    atomic.Int64
+	lastUpdateSeq atomic.Int64
+	corePtr       *core.Core
+	// startMu's write side serializes everything that stops or starts the
+	// core, and guards lastStartFailTime. The watchdog's StartCore only tries
+	// it -- a start already under way is all it wanted -- but a restart waits
+	// for it. It used to be a flag every path skipped on, so a restart for a
+	// change committed while the watchdog was starting the core gave up, and
+	// the core stayed on the config that start had read before the commit; and
+	// RestartCore and StopCore did not take it at all, so a restart button
+	// pressed during another restart could stop the core that one had just
+	// started.
+	//
+	// Its read side is held by every write that also changes the running core
+	// (HoldCore): ConfigService.Save for the whole save, and the jobs that
+	// change users outside it. Without that, a write landing mid-restart found
+	// the core "not running", skipped the hot change, and -- committed after
+	// the restart had read its config -- was missing from the new core until
+	// the next restart: a client added then could not connect, and one
+	// depleted then kept its access.
+	startMu sync.RWMutex
+	// restartQueued is set while a requested restart waits for startMu, and
+	// queuedRestarts counts the ones that ran; see requestRestart.
+	restartQueued  atomic.Bool
+	queuedRestarts atomic.Int64
+	// coreRetired is set once the process is done with this core; see
+	// RetireCore.
+	coreRetired       atomic.Bool
+	lastStartFailTime time.Time
+	startCooldown     = 15 * time.Second
 )
 
 type ConfigService struct {
@@ -75,6 +98,9 @@ type SingBoxConfig struct {
 
 func NewConfigService(c *core.Core) *ConfigService {
 	corePtr = c
+	// A new core is not retired, whatever the one before it was: this is how
+	// a SIGHUP's re-Init comes back after app.Stop retired the old one.
+	coreRetired.Store(false)
 	// The gate is read per connection rather than captured by each tracker, so
 	// installing it here does not have to be ordered against the first StartCore.
 	core.SetConnGate(ipLimits.allow)
@@ -282,7 +308,22 @@ func isEmptyRawJSON(raw json.RawMessage) bool {
 	return false
 }
 
+// StartCore starts the core if it is down, waiting for whatever holds startMu:
+// a restart that is under way, or a save. Waiting matters since saves hold its
+// read side -- trying instead let a save in progress turn "maintenance off"
+// into a success that started nothing.
 func (s *ConfigService) StartCore() error {
+	return s.startCore(false)
+}
+
+// TryStartCore is StartCore for the five-second watchdog, which gives up when
+// startMu is held: a start already under way is all it wanted, and a save will
+// be over by its next tick.
+func (s *ConfigService) TryStartCore() error {
+	return s.startCore(true)
+}
+
+func (s *ConfigService) startCore(try bool) error {
 	// First, so the five-second watchdog stops at this line while the core is
 	// out of service.
 	if maintenanceMode.Load() {
@@ -291,9 +332,16 @@ func (s *ConfigService) StartCore() error {
 	if corePtr.IsRunning() {
 		return nil
 	}
-	startCoreMu.Lock()
-	if startCoreInProgress {
-		startCoreMu.Unlock()
+	if try {
+		if !startMu.TryLock() {
+			return nil
+		}
+	} else {
+		startMu.Lock()
+	}
+	defer startMu.Unlock()
+	// A restart may have brought it up between the check above and the lock.
+	if corePtr.IsRunning() {
 		return nil
 	}
 	if remaining := startCooldown - time.Since(lastStartFailTime); remaining > 0 {
@@ -302,17 +350,22 @@ func (s *ConfigService) StartCore() error {
 		// checkCoreJob lands here every 5s, so the useful number is what is
 		// left rather than the constant.
 		logger.Info("start core in cooldown, retrying in ", remaining.Truncate(time.Second))
-		startCoreMu.Unlock()
 		return nil
 	}
-	startCoreInProgress = true
-	startCoreMu.Unlock()
-	defer func() {
-		startCoreMu.Lock()
-		startCoreInProgress = false
-		startCoreMu.Unlock()
-	}()
+	return s.startLocked(true)
+}
 
+// startLocked starts the core from the stored config. The caller holds
+// startMu. A failure is recorded for the watchdog's cooldown and published;
+// announce publishes CoreUp on success.
+func (s *ConfigService) startLocked(announce bool) error {
+	// Every start comes through here holding startMu, and RetireCore sets the
+	// flag before it takes startMu to stop the core: a start that got in first
+	// is stopped by it, and one that comes after stops here.
+	if coreRetired.Load() {
+		logger.Info("not starting core: the panel is done with it")
+		return nil
+	}
 	logger.Info("starting core")
 	rawConfig, err := s.GetConfig("")
 	if err != nil {
@@ -323,9 +376,7 @@ func (s *ConfigService) StartCore() error {
 	}
 	up, err := startBox(*rawConfig)
 	if err != nil {
-		startCoreMu.Lock()
 		lastStartFailTime = time.Now()
-		startCoreMu.Unlock()
 		logger.Error("start sing-box err:", err.Error())
 		// checkCoreJob retries every 5s, so this is published on every attempt
 		// for as long as the core stays down. The suppressor only lets the
@@ -338,10 +389,25 @@ func (s *ConfigService) StartCore() error {
 		return nil
 	}
 	logger.Info("sing-box started")
-	// Reached only on an actual start: the guard at the top of this function
-	// returns early when the core is already running, so a healthy panel does
-	// not publish this every 5s.
-	notify.Publish(notify.Event{Kind: notify.CoreUp})
+	if announce {
+		notify.Publish(notify.Event{Kind: notify.CoreUp})
+	}
+	return nil
+}
+
+// stopLocked stops the core, first leaving what it has counted since the last
+// stats flush for the next one (carryOverStats). The caller holds startMu.
+//
+// The core is down even when this returns an error: Core.Stop drops the box
+// before closing it, and the error is what some component's cleanup reported.
+// So a restart logs it and starts anyway -- returning there left the core down
+// until the watchdog came round.
+func stopLocked() error {
+	carryOverStats()
+	if err := corePtr.Stop(); err != nil {
+		return err
+	}
+	logger.Info("sing-box stopped")
 	return nil
 }
 
@@ -359,74 +425,82 @@ func (s *ConfigService) RestartCore() error {
 	if maintenanceMode.Load() {
 		return common.NewError("the core is stopped for maintenance")
 	}
-	err := s.StopCore()
-	if err != nil {
-		return err
+	startMu.Lock()
+	defer startMu.Unlock()
+	if err := stopLocked(); err != nil {
+		logger.Warning("restart sing-box (stop): ", err)
 	}
-	return s.StartCore()
+	return s.startLocked(true)
 }
 
-// ApplyReenabledUsers brings the running core up to date after a global
-// traffic reset re-enabled clients on the given inbounds. In place where it
-// can be, so the reset does not drop every connection on the panel.
+// HoldCore runs fn holding off any restart: none begins while fn runs, and fn
+// does not begin while one is under way. For a write that is applied to the
+// running core as well -- see startMu. fn must not start or stop the core.
+func HoldCore(fn func()) {
+	startMu.RLock()
+	defer startMu.RUnlock()
+	fn()
+}
+
+// ResetTraffic runs reset -- a global traffic reset, which re-enables depleted
+// clients and returns the inbounds they are on -- and brings the running core
+// up to date with it. In place where it can be, so the reset does not drop
+// every connection on the panel; and under HoldCore, so a restart cannot come
+// between the two and leave the re-enabled clients out of the new core.
 //
 // UpdateInboundsUsers stops at the first inbound it cannot update, leaving the
 // rest on their old user lists: the re-enabled clients would stay rejected
 // with nothing to retry it, because the reset is already committed. A full
 // restart is the fallback that cannot leave part of the core stale -- and if
 // that fails too, the core is down, which the watchdog does recover.
-func (s *ConfigService) ApplyReenabledUsers(inboundIds []uint) error {
-	if len(inboundIds) == 0 {
-		return nil
+//
+// resetErr is reset's own, and means nothing changed; coreErr is a core the
+// fallback restart could not bring up.
+func (s *ConfigService) ResetTraffic(reset func() ([]uint, error)) (resetErr error, coreErr error) {
+	var updateErr error
+	HoldCore(func() {
+		var inboundIds []uint
+		inboundIds, resetErr = reset()
+		if resetErr == nil && len(inboundIds) > 0 {
+			updateErr = s.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIds)
+		}
+	})
+	if resetErr != nil || updateErr == nil {
+		return resetErr, nil
 	}
-	err := s.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIds)
-	if err == nil {
-		return nil
-	}
-	logger.Warning("in-place user update after the traffic reset failed, restarting the core: ", err)
-	return s.RestartCore()
+	logger.Warning("in-place user update after the traffic reset failed, restarting the core: ", updateErr)
+	return nil, s.RestartCore()
 }
 
-func (s *ConfigService) restartCoreWithConfig(config json.RawMessage) error {
+// requestRestart restarts the core, off the caller's goroutine, for a change
+// already committed. A request arriving while an earlier one still waits for
+// startMu is folded into it: that one reads the config only once it holds the
+// lock, so it carries the later change too. Editing five members of a group in
+// a row costs one restart, not five back to back.
+func (s *ConfigService) requestRestart() {
+	if restartQueued.Swap(true) {
+		return
+	}
+	go func() { _ = s.restartQueuedCore() }()
+}
+
+func (s *ConfigService) restartQueuedCore() error {
 	// The config is saved either way; it takes effect when the core is
 	// started again.
 	if maintenanceMode.Load() {
+		restartQueued.Store(false)
 		return nil
 	}
-	startCoreMu.Lock()
-	if startCoreInProgress {
-		startCoreMu.Unlock()
-		return nil
+	startMu.Lock()
+	defer startMu.Unlock()
+	// From here on a request needs a restart of its own: this one may already
+	// have read the config by the time that request's change commits.
+	restartQueued.Store(false)
+	queuedRestarts.Add(1)
+	if err := stopLocked(); err != nil {
+		logger.Warning("restart sing-box (stop): ", err)
 	}
-	startCoreInProgress = true
-	startCoreMu.Unlock()
-	defer func() {
-		startCoreMu.Lock()
-		startCoreInProgress = false
-		startCoreMu.Unlock()
-	}()
-
-	if corePtr.IsRunning() {
-		if err := corePtr.Stop(); err != nil {
-			logger.Error("restart sing-box err (stop):", err.Error())
-			return err
-		}
-	}
-	rawConfig, err := s.GetConfig(string(config))
-	if err != nil {
-		logger.Error("restart sing-box err (get config):", err.Error())
-		return err
-	}
-	up, err := startBox(*rawConfig)
-	if err != nil {
-		logger.Error("restart sing-box err (start):", err.Error())
-		return err
-	}
-	if !up {
-		return nil
-	}
-	logger.Info("sing-box restarted with new config")
-	return nil
+	return s.startLocked(false)
 }
 
 // startBox starts the core, and undoes it when maintenance was switched on
@@ -452,13 +526,26 @@ func startBox(rawConfig []byte) (up bool, err error) {
 	return true, nil
 }
 
+// RetireCore stops the core for good: for app.Stop, and for the exec of an
+// in-place update. Nothing starts it again until NewConfigService installs a
+// new one or startCoreAfterFailedExec takes it back.
+//
+// StopCore alone was not enough. A restart queued by a save just before
+// (requestRestart), or the watchdog, could take startMu after the stop and
+// start the core again: on a SIGHUP that was the old Core, started after
+// Init had already replaced corePtr, so it ran on unowned with every inbound
+// port held and every later start failing on them; before an exec it carried
+// the core's auto-route rules into the new process, which is what stopping
+// it first is for.
+func (s *ConfigService) RetireCore() error {
+	coreRetired.Store(true)
+	return s.StopCore()
+}
+
 func (s *ConfigService) StopCore() error {
-	err := corePtr.Stop()
-	if err != nil {
-		return err
-	}
-	logger.Info("sing-box stopped")
-	return nil
+	startMu.Lock()
+	defer startMu.Unlock()
+	return stopLocked()
 }
 
 // TestAcme attempts to obtain a certificate for the domain right now, so the UI
@@ -507,35 +594,42 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	var savedIds []uint
 	// Set once the change row is in; the deferred commit is what publishes it.
 	var dt int64
-	// Set when the base config changed. The restart waits for the commit:
-	// launched from inside the transaction, a later failure -- the changes
-	// row, or anything after it -- rolls the write back while the core is
-	// already running a config that was never saved.
-	var restartWith json.RawMessage
+	// Set when the base config changed, or a change reached an outbound or
+	// endpoint a group depends on, which cannot be swapped in place. The
+	// restart waits for the commit: launched from inside the transaction, a
+	// later failure -- the changes row, or anything after it -- rolls the
+	// write back while the core is already running a config that was never
+	// saved.
+	var restartCore bool
 
+	// See HoldCore. Released before the restart below, which needs the write
+	// side, and before StartCore, which only tries it.
+	startMu.RLock()
 	db := database.GetDB()
 	tx := db.Begin()
 	defer func() {
-		if err == nil {
-			tx.Commit()
-			// Marks the change and wakes the hub, and both halves have to
-			// happen after the commit. The hub reads on its own pooled
-			// connection, so notifying earlier publishes a pre-commit view.
-			// The mark is also what invalidates the config cache, and the DB
-			// runs in WAL -- a reader racing the commit sees the old snapshot
-			// rather than blocking -- so marking earlier let such a reader
-			// cache the pre-change config under the post-change key and serve
-			// it for the whole TTL, outliving the push that would repair it
-			// (same entry, same cseq, so the SPA drops it as not newer).
-			SetLastUpdate(dt)
-			if restartWith != nil {
-				go func() { _ = s.restartCoreWithConfig(restartWith) }()
-			} else if !corePtr.IsRunning() {
-				// Try to start core if it is not running
-				s.StartCore()
-			}
-		} else {
+		if err != nil {
 			tx.Rollback()
+			startMu.RUnlock()
+			return
+		}
+		tx.Commit()
+		// Marks the change and wakes the hub, and both halves have to
+		// happen after the commit. The hub reads on its own pooled
+		// connection, so notifying earlier publishes a pre-commit view.
+		// The mark is also what invalidates the config cache, and the DB
+		// runs in WAL -- a reader racing the commit sees the old snapshot
+		// rather than blocking -- so marking earlier let such a reader
+		// cache the pre-change config under the post-change key and serve
+		// it for the whole TTL, outliving the push that would repair it
+		// (same entry, same cseq, so the SPA drops it as not newer).
+		SetLastUpdate(dt)
+		startMu.RUnlock()
+		if restartCore {
+			s.requestRestart()
+		} else if !corePtr.IsRunning() {
+			// Try to start core if it is not running
+			s.StartCore()
 		}
 	}()
 
@@ -553,23 +647,21 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			}
 		}
 	case "tls":
-		err = s.TlsService.Save(tx, act, data, hostname)
+		restartCore, err = s.TlsService.Save(tx, act, data, hostname)
 	case "inbounds":
 		err = s.InboundService.Save(tx, act, data, initUsers, hostname)
 	case "outbounds":
-		err = s.OutboundService.Save(tx, act, data)
+		restartCore, err = s.OutboundService.Save(tx, act, data)
 	case "services":
 		err = s.ServicesService.Save(tx, act, data)
 	case "endpoints":
-		err = s.EndpointService.Save(tx, act, data)
+		restartCore, err = s.EndpointService.Save(tx, act, data)
 	case "config":
 		err = s.SettingService.SaveConfig(tx, data)
 		if err != nil {
 			return nil, err
 		}
-		configData := make(json.RawMessage, len(data))
-		copy(configData, data)
-		restartWith = configData
+		restartCore = true
 	case "settings":
 		err = s.SettingService.Save(tx, data)
 	case "nodes":

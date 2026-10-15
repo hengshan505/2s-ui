@@ -83,61 +83,101 @@ func (o *OutboundService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 	return outboundsJson, nil
 }
 
-func (s *OutboundService) Save(tx *gorm.DB, act string, data json.RawMessage) error {
-	var err error
-
+// Save writes an outbound and applies it to the running core. restartCore
+// reports an edit the core cannot take in place -- of an outbound a selector or
+// urltest uses, which resolved it at start -- and that the caller applies by
+// restarting the core once the change is committed.
+func (s *OutboundService) Save(tx *gorm.DB, act string, data json.RawMessage) (restartCore bool, err error) {
 	switch act {
 	case "new", "edit":
 		var outbound model.Outbound
 		err = outbound.UnmarshalJSON(data)
 		if err != nil {
-			return err
+			return false, err
+		}
+
+		err = tagFreeAcross(tx, model.Outbound{}, "outbound", outbound.Tag, outbound.Id)
+		if err != nil {
+			return false, err
 		}
 
 		if corePtr.IsRunning() {
 			configData, err := outbound.MarshalJSON()
 			if err != nil {
-				return err
+				return false, err
 			}
+			var old model.Outbound
 			if act == "edit" {
-				var oldTag string
-				err = tx.Model(model.Outbound{}).Select("tag").Where("id = ?", outbound.Id).Find(&oldTag).Error
+				err = tx.Model(model.Outbound{}).Where("id = ?", outbound.Id).Find(&old).Error
 				if err != nil {
-					return err
+					return false, err
+				}
+			}
+			oldTag := old.Tag
+			switch {
+			case act == "edit" && oldTag == outbound.Tag && sameConfig(old.MarshalJSON, configData) && corePtr.HasOutbound(oldTag):
+				// Saved as it was: nothing for the core to do, and for a
+				// group's member the restart below would drop every
+				// connection on the panel for nothing. Only while the core
+				// does hold it: saving one unchanged is also how an operator
+				// puts back one the core lost.
+			case act == "edit" && oldTag == outbound.Tag && len(corePtr.OutboundDependents(oldTag)) > 0:
+				// Replacing it would leave the groups on the closed instance,
+				// and refusing would make the edit impossible without
+				// deleting every group first. Vetted now so that what the
+				// core would refuse at start -- a cycle, a missing detour --
+				// is still refused before the commit, not left to take the
+				// whole core down on the restart.
+				err = corePtr.ValidateOutbound(configData)
+				if err != nil {
+					return false, err
+				}
+				restartCore = true
+			case act == "edit" && oldTag != outbound.Tag:
+				// A rename starts the new one before removing the old, so a
+				// failure on either side leaves the core as it was. An
+				// outbound holds no port, so the two can overlap.
+				err = corePtr.AddOutbound(configData)
+				if err != nil {
+					return false, err
 				}
 				err = corePtr.RemoveOutbound(oldTag)
 				if err != nil && err != os.ErrInvalid {
-					return err
+					_ = corePtr.RemoveOutbound(outbound.Tag)
+					return false, err
 				}
-			}
-			err = corePtr.AddOutbound(configData)
-			if err != nil {
-				return err
+			default:
+				// One that keeps its tag is replaced in place (see
+				// InboundService.Save).
+				err = corePtr.AddOutbound(configData)
+				if err != nil {
+					return false, err
+				}
 			}
 		}
 
 		err = tx.Save(&outbound).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 	case "del":
 		var tag string
 		err = json.Unmarshal(data, &tag)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if corePtr.IsRunning() {
 			err = corePtr.RemoveOutbound(tag)
 			if err != nil && err != os.ErrInvalid {
-				return err
+				return false, err
 			}
 		}
 		err = tx.Where("tag = ?", tag).Delete(model.Outbound{}).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 	default:
-		return common.NewErrorf("unknown action: %s", act)
+		return false, common.NewErrorf("unknown action: %s", act)
 	}
-	return nil
+	return restartCore, nil
 }

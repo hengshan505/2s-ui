@@ -74,8 +74,8 @@ func TestMaintenanceGatesEveryPathThatStartsTheCore(t *testing.T) {
 
 	// A config save restarts the core with the new config. The config is
 	// stored either way; it takes effect when maintenance ends.
-	if err := s.restartCoreWithConfig(json.RawMessage(unusable)); err != nil {
-		t.Errorf("restartCoreWithConfig under maintenance = %v, want nil: same, it has to return first", err)
+	if err := s.restartQueuedCore(); err != nil {
+		t.Errorf("restartQueuedCore under maintenance = %v, want nil: same, it has to return first", err)
 	}
 	if s.CoreRunning() {
 		t.Error("a config save started the core while it was out of service")

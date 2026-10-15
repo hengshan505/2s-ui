@@ -188,7 +188,10 @@ func (a *APP) Stop() {
 	// failure should still find the notifier up.
 	tgbot.Stop()
 	notify.Stop()
-	err = a.configService.StopCore()
+	// While the core still runs: what it counted since the last flush has no
+	// next flush to go to once the process exits.
+	service.FlushStats()
+	err = a.configService.RetireCore()
 	if err != nil {
 		logger.Warning("stop Core err:", err)
 	}

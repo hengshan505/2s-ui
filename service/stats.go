@@ -3,6 +3,7 @@ package service
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shenaba/2s-ui/database"
@@ -152,11 +153,25 @@ func takePending() []model.Stats {
 	return held
 }
 
-// holdPending keeps a batch that failed to commit, dropping the oldest rows if
-// it has grown past the cap.
+// holdPending keeps a batch that failed to commit. It goes in front of whatever
+// was carried over while it ran (carryOverStats), which a plain replace would
+// throw away; the batch is older, being what the flush took first.
 func holdPending(batch []model.Stats) {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
+	keepPendingLocked(append(batch, pendingStats...))
+}
+
+// carryPending adds rows newer than everything already held.
+func carryPending(rows []model.Stats) {
+	pendingMu.Lock()
+	defer pendingMu.Unlock()
+	keepPendingLocked(append(pendingStats, rows...))
+}
+
+// keepPendingLocked stores batch, oldest first, dropping the oldest rows if it
+// has grown past the cap. The caller holds pendingMu.
+func keepPendingLocked(batch []model.Stats) {
 	if len(batch) > maxPendingStats {
 		dropped := len(batch) - maxPendingStats
 		logger.Warning("stats: dropping ", dropped,
@@ -166,19 +181,70 @@ func holdPending(batch []model.Stats) {
 	pendingStats = batch
 }
 
-func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error {
-	if corePtr == nil || !corePtr.IsRunning() {
-		return nil
+// carryOverStats takes what the running core has counted since the last flush
+// and leaves it for the next one, which commits it from the pending buffer.
+// Called just before the core is stopped: Box.Close resets the tracker, so what
+// it held would otherwise be lost -- up to ten seconds of every client's
+// traffic, on every restart: the restart button, a route/DNS settings save, an
+// edit to a group's member, the watchdog.
+//
+// The per-inbound totals are folded here, as SaveStats folds them from each
+// drain exactly once; the database rows and the per-client counters, which
+// SaveStats takes from the whole batch, ride along in the buffer.
+func carryOverStats() {
+	if corePtr == nil {
+		return
 	}
 	box := corePtr.GetInstance()
-	if box == nil {
-		return nil
+	if box == nil || box.StatsTracker() == nil {
+		return
 	}
-	st := box.StatsTracker()
-	if st == nil {
-		return nil
+	drained := *box.StatsTracker().GetStats()
+	if len(drained) == 0 {
+		return
 	}
-	drained := st.GetStats()
+	inboundDelta := map[string]int64{}
+	for _, stat := range drained {
+		if stat.Resource == "inbound" {
+			inboundDelta[stat.Tag] += stat.Traffic
+		}
+	}
+	addInboundTraffic(inboundDelta)
+	carryPending(drained)
+}
+
+// statsFlush is the stats job's own run, registered by the cron job, which is
+// what knows the settings a flush needs (traffic retention, bucket size).
+var statsFlush atomic.Pointer[func()]
+
+func SetStatsFlush(flush func()) {
+	statsFlush.Store(&flush)
+}
+
+// FlushStats commits what the core has counted, now, while it is still
+// running. For the exits that leave no next flush -- shutdown and the exec
+// restart of an in-place update: carryOverStats only hands the traffic to a
+// flush that will never come there.
+func FlushStats() {
+	if flush := statsFlush.Load(); flush != nil && *flush != nil {
+		(*flush)()
+	}
+}
+
+func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error {
+	// With the core down there is nothing to drain, but the pending rows still
+	// go in: stopping the core carries its last counts there
+	// (carryOverStats), and a core that will not start again -- or a shutdown
+	// with the core already down -- would otherwise hold them until they are
+	// lost with the process.
+	drained := &[]model.Stats{}
+	if corePtr != nil && corePtr.IsRunning() {
+		if box := corePtr.GetInstance(); box != nil {
+			if st := box.StatsTracker(); st != nil {
+				drained = st.GetStats()
+			}
+		}
+	}
 
 	// Built locally, then published in one swap at the end — writing the live
 	// struct field by field is what raced with readers.

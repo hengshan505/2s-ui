@@ -20,9 +20,11 @@ import (
 // "reconnects once" meant "hangs for up to 30 seconds, then reconnects".
 //
 // core/quicgrace has its own tests; this one is about the wiring: the copies
-// have to route their listener through it, and Close has to stop the service
-// before the listener closes the socket the packet goes out on. Get either
-// wrong and the package tests still pass while nothing reaches a client.
+// have to route their listener through it, and the service has to close
+// before the listener closes the socket the packet goes out on -- which since
+// sing-box 1.14.3 is the order the copies' Start registers the two with its
+// scope, and which RemoveInbound reaches through core/managers.go. Get any of
+// it wrong and the package tests still pass while nothing reaches a client.
 func TestRemovingAQUICInboundTellsItsClients(t *testing.T) {
 	certPath, keyPath := writeTestCert(t)
 	quicTLS := map[string]any{

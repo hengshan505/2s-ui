@@ -114,11 +114,18 @@ func (s *ResetTrafficJob) Run() {
 	// The next boundary commits with the reset or not at all: written apart, a
 	// failed write left the boundary in the past and every later tick reset
 	// everyone again.
-	inboundIds, err := s.ConfigService.ClientService.ResetAllClientsTraffic(func(tx *gorm.DB) error {
-		return settings.ArmGlobalReset(tx, after.Unix(), want)
+	//
+	// In place, as DepleteJob does, rather than by restarting the core. A
+	// restart dropped every connection on the panel, and left every QUIC client
+	// waiting out its idle timeout on a session the server had silently
+	// discarded. Only the inbounds of re-enabled clients change at all.
+	resetErr, coreErr := s.ConfigService.ResetTraffic(func() ([]uint, error) {
+		return s.ConfigService.ClientService.ResetAllClientsTraffic(func(tx *gorm.DB) error {
+			return settings.ArmGlobalReset(tx, after.Unix(), want)
+		})
 	})
-	if err != nil {
-		logger.Warning("ResetTrafficJob: reset all clients failed, retrying next tick: ", err)
+	if resetErr != nil {
+		logger.Warning("ResetTrafficJob: reset all clients failed, retrying next tick: ", resetErr)
 		return
 	}
 
@@ -128,12 +135,8 @@ func (s *ResetTrafficJob) Run() {
 	s.NodeSyncService.MarkAllDirty()
 	go s.NodeSyncService.ReconcileDirtyOnline()
 
-	// In place, as DepleteJob does, rather than by restarting the core. A
-	// restart dropped every connection on the panel, and left every QUIC client
-	// waiting out its idle timeout on a session the server had silently
-	// discarded. Only the inbounds of re-enabled clients change at all.
-	if err = s.ConfigService.ApplyReenabledUsers(inboundIds); err != nil {
-		logger.Error("ResetTrafficJob: unable to update the core: ", err)
+	if coreErr != nil {
+		logger.Error("ResetTrafficJob: unable to update the core: ", coreErr)
 	}
 	logger.Info("ResetTrafficJob: traffic reset for all clients; next reset at ", after.Format(time.RFC3339))
 }

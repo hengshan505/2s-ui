@@ -28,31 +28,32 @@ func (s *TlsService) GetAll() ([]model.Tls, error) {
 	return tlsConfig, nil
 }
 
-func (s *TlsService) Save(tx *gorm.DB, action string, data json.RawMessage, hostname string) error {
-	var err error
-
+// Save writes a TLS config. restartCore reports that an endpoint using it is
+// one a group depends on, which cannot be swapped in a running core: the
+// caller restarts the core after the commit (EndpointService.RestartEndpoints).
+func (s *TlsService) Save(tx *gorm.DB, action string, data json.RawMessage, hostname string) (restartCore bool, err error) {
 	switch action {
 	case "new", "edit":
 		var tls model.Tls
 		err = json.Unmarshal(data, &tls)
 		if err != nil {
-			return err
+			return false, err
 		}
 		setCertFingerprint(&tls)
 		err = tx.Save(&tls).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 		if action == "edit" {
 			var inbounds []model.Inbound
 			err = tx.Model(model.Inbound{}).Preload("Tls").Where("tls_id = ?", tls.Id).Find(&inbounds).Error
 			if err != nil {
-				return err
+				return false, err
 			}
 			if len(inbounds) > 0 {
 				err = s.ClientService.UpdateLinksByInboundChange(tx, &inbounds, hostname, "")
 				if err != nil {
-					return err
+					return false, err
 				}
 				var inboundIds []uint
 				for _, inbound := range inbounds {
@@ -60,22 +61,22 @@ func (s *TlsService) Save(tx *gorm.DB, action string, data json.RawMessage, host
 				}
 				err = s.InboundService.UpdateOutJsons(tx, inboundIds, hostname)
 				if err != nil {
-					return common.NewError("unable to update out_json of inbounds: ", err.Error())
+					return false, common.NewError("unable to update out_json of inbounds: ", err.Error())
 				}
 				err = s.InboundService.RestartInbounds(tx, inboundIds)
 				if err != nil {
-					return err
+					return false, err
 				}
 			}
 			var serviceIds []uint
 			err = tx.Model(model.Service{}).Where("tls_id = ?", tls.Id).Scan(&serviceIds).Error
 			if err != nil {
-				return err
+				return false, err
 			}
 			if len(serviceIds) > 0 {
 				err = s.ServicesService.RestartServices(tx, serviceIds)
 				if err != nil {
-					return err
+					return false, err
 				}
 			}
 			// Endpoints can reference a TLS config since 1.14, so they have to
@@ -83,12 +84,12 @@ func (s *TlsService) Save(tx *gorm.DB, action string, data json.RawMessage, host
 			var endpointIds []uint
 			err = tx.Model(model.Endpoint{}).Where("tls_id = ?", tls.Id).Pluck("id", &endpointIds).Error
 			if err != nil {
-				return err
+				return false, err
 			}
 			if len(endpointIds) > 0 {
-				err = s.EndpointService.RestartEndpoints(tx, endpointIds)
+				restartCore, err = s.EndpointService.RestartEndpoints(tx, endpointIds)
 				if err != nil {
-					return err
+					return false, err
 				}
 			}
 		}
@@ -96,33 +97,33 @@ func (s *TlsService) Save(tx *gorm.DB, action string, data json.RawMessage, host
 		var id uint
 		err = json.Unmarshal(data, &id)
 		if err != nil {
-			return err
+			return false, err
 		}
 		var inboundCount int64
 		err = tx.Model(model.Inbound{}).Where("tls_id = ?", id).Count(&inboundCount).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 		var serviceCount int64
 		err = tx.Model(model.Service{}).Where("tls_id = ?", id).Count(&serviceCount).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 		var endpointCount int64
 		err = tx.Model(model.Endpoint{}).Where("tls_id = ?", id).Count(&endpointCount).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 		if inboundCount > 0 || serviceCount > 0 || endpointCount > 0 {
-			return common.NewError("tls in use")
+			return false, common.NewError("tls in use")
 		}
 		err = tx.Where("id = ?", id).Delete(model.Tls{}).Error
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	return nil
+	return restartCore, nil
 }
 
 func setCertFingerprint(t *model.Tls) {

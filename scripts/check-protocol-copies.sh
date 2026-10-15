@@ -53,10 +53,15 @@ LOCAL_ONLY="users.go"
 #    never sees, so that one call is redirected through users.go as well.
 #
 # 3. The three QUIC copies (hysteria, hysteria2, tuic) close their sessions
-#    gracefully -- see core/quicgrace. That is 4 lines in each: the service's
-#    TLSConfig goes through gracefulTLS (defined in users.go), and Close puts
-#    the service first, ahead of the listener whose socket the CONNECTION_CLOSE
-#    has to go out on. Both are a changed line rather than a new one.
+#    gracefully -- see core/quicgrace. That is 2 lines in each: the service's
+#    TLSConfig goes through gracefulTLS (defined in users.go), a changed line
+#    rather than a new one. The other half -- the service closing before the
+#    listener whose socket the CONNECTION_CLOSE has to go out on -- used to be
+#    a reordered Close and is now upstream's own order: since 1.14.3 Start
+#    registers scope.Add(listener.Close) before scope.Add(service.Close), and
+#    the scope runs its cleanups in reverse. A re-copy that ever sees those two
+#    swapped upstream has to swap them back here, and nothing below would count
+#    it as drift, which is why core/quic_close_test.go exists.
 #
 # Re-copying after a sing-box bump will change these. Re-apply all three,
 # then put the new counts here -- and read the diff first rather than just
@@ -65,10 +70,10 @@ LOCAL_ONLY="users.go"
 expect_diff() {
   case "$1" in
     anytls/inbound.go) echo 3 ;;
-    hysteria/inbound.go) echo 33 ;;
-    hysteria2/inbound.go) echo 33 ;;
+    hysteria/inbound.go) echo 31 ;;
+    hysteria2/inbound.go) echo 31 ;;
     trojan/inbound.go) echo 26 ;;
-    tuic/inbound.go) echo 31 ;;
+    tuic/inbound.go) echo 29 ;;
     vless/inbound.go) echo 30 ;;
     vmess/inbound.go) echo 28 ;;
     *) echo 0 ;;
@@ -124,5 +129,59 @@ if [ "$status" -ne 0 ]; then
   echo
   echo "The copies no longer match sing-box $VERSION." >&2
   echo "Re-copy from $MODDIR/protocol/<proto>/ and re-apply local changes." >&2
+fi
+
+# core/box.go and core/managers.go are not copies -- the managers had to be
+# rewritten to support Remove and late starts, which 1.14.3 took out -- so a
+# line diff against upstream says nothing useful about them. They do mirror
+# what these upstream files do at start (the stage order, the scope teardown,
+# the outbound dependency order, the default outbound), and would go stale
+# exactly as silently as the copies above. So the upstream files they were last checked against are pinned
+# by checksum: when one changes, read it against core/box.go and
+# core/managers.go, carry over whatever matters, then update the sum here.
+pinned_sha256() {
+  case "$1" in
+    box.go) echo 35d8a84442bedb1c32ef13515d90bb356d32a1210771f709bde9c4428defb964 ;;
+    adapter/lifecycle.go) echo 39b3d66ba2a00eaaa45a0459bf24b4f021b5779e01b3d0995bd9f611e354b0ef ;;
+    adapter/inbound/manager.go) echo 86a590a31281399a376aef4caf2d59bb1287f3a38c4a561a9982cf8d6f3c2576 ;;
+    adapter/outbound/manager.go) echo 531429c3a382fb6a50bd854d956de59b5ab4676dedd532a03af592d4e0e867ae ;;
+    adapter/endpoint/manager.go) echo 27f6fe25e0c635ad17ad91ebb2f7728ea010cce9ed0e6242f5b49fec2589183b ;;
+    adapter/service/manager.go) echo 14446e05ea83f34b9f20fb3aed9b6be55b2097f11c998cd5d2bcdc798ff6e372 ;;
+  esac
+}
+
+# macOS ships shasum rather than sha256sum. Read from stdin either way: given a
+# path, sha256sum escapes its output line with a leading backslash when the path
+# has one, as it does on Windows.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 < "$1" | cut -d' ' -f1
+  fi
+}
+
+echo "checking upstream files mirrored by core/box.go and core/managers.go"
+pinned_status=0
+for name in box.go adapter/lifecycle.go adapter/inbound/manager.go adapter/outbound/manager.go adapter/endpoint/manager.go adapter/service/manager.go; do
+  upstream_file="$MODDIR/$name"
+  if [ ! -f "$upstream_file" ]; then
+    echo "  $name: FAIL - gone from sing-box $VERSION"
+    pinned_status=1
+    continue
+  fi
+  actual=$(sha256_of "$upstream_file")
+  if [ "$actual" = "$(pinned_sha256 "$name")" ]; then
+    echo "  $name: ok"
+  else
+    echo "  $name: CHANGED - sha256 $actual"
+    pinned_status=1
+  fi
+done
+if [ "$pinned_status" -ne 0 ]; then
+  echo
+  echo "Upstream changed files that core/box.go and core/managers.go mirror." >&2
+  echo "Read them in $MODDIR against those two, then update pinned_sha256." >&2
+  status=1
 fi
 exit "$status"
