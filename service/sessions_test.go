@@ -131,28 +131,6 @@ func TestDisconnectClusterUserMerge(t *testing.T) {
 	}
 }
 
-// Nodes answer in any order; the list does not.
-func TestSortUnclosable(t *testing.T) {
-	list := []core.UnclosableInbound{
-		{Tag: "tuic", Node: "b"},
-		{Tag: "ss", Node: ""},
-		{Tag: "ss", Node: "a"},
-		{Tag: "hy2", Node: "b"},
-		{Tag: "hy2", Node: ""},
-	}
-	sortUnclosable(list)
-	want := []core.UnclosableInbound{
-		{Tag: "hy2", Node: ""},
-		{Tag: "ss", Node: ""},
-		{Tag: "ss", Node: "a"},
-		{Tag: "hy2", Node: "b"},
-		{Tag: "tuic", Node: "b"},
-	}
-	if !reflect.DeepEqual(list, want) {
-		t.Errorf("sorted = %+v\nwant     %+v", list, want)
-	}
-}
-
 // A kick goes to every online node, not only the ones whose online list names
 // the client: that list drops a client after 10s without traffic.
 func TestOnlineNodes(t *testing.T) {

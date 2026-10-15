@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"net/url"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -237,17 +238,6 @@ func nodeUnclosable(node string, remote core.DisconnectResult) []core.Unclosable
 	return labelled
 }
 
-// sortUnclosable puts this panel's own inbounds first, then each node's, so the
-// order does not depend on which node answered first.
-func sortUnclosable(list []core.UnclosableInbound) {
-	sort.SliceStable(list, func(i, j int) bool {
-		if list[i].Node != list[j].Node {
-			return list[i].Node < list[j].Node
-		}
-		return list[i].Tag < list[j].Tag
-	})
-}
-
 // DisconnectClusterUser drops a user's live connections here and on every
 // online node. The user stays enabled everywhere, so it can reconnect at once
 // -- this is a kick, not a ban.
@@ -303,7 +293,9 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 			merged.Sessions += remote.Sessions
 			merged.UnclosableInbounds = append(merged.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
 		})
-	sortUnclosable(merged.UnclosableInbounds)
+	// The same order the core's own list is in, so that it does not depend on
+	// which node answered first, nor on whether any node did.
+	slices.SortStableFunc(merged.UnclosableInbounds, core.CompareUnclosable)
 	result.DisconnectWire = merged.Wire()
 	return result, nil
 }

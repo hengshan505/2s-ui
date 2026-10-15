@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -232,5 +233,89 @@ func TestDisconnectWireCarriesEveryField(t *testing.T) {
 		if _, ok := sent[name]; !ok {
 			t.Errorf("field %s (%q) is not sent: %s", fields.Field(i).Name, name, raw)
 		}
+	}
+}
+
+// The one order for every report: this panel's own inbounds, then each
+// node's, by tag within each.
+func TestCompareUnclosable(t *testing.T) {
+	list := []UnclosableInbound{
+		{Tag: "tuic", Node: "b"},
+		{Tag: "ss", Node: ""},
+		{Tag: "ss", Node: "a"},
+		{Tag: "hy2", Node: "b"},
+		{Tag: "hy2", Node: ""},
+	}
+	slices.SortFunc(list, CompareUnclosable)
+	want := []UnclosableInbound{
+		{Tag: "hy2", Node: ""},
+		{Tag: "ss", Node: ""},
+		{Tag: "ss", Node: "a"},
+		{Tag: "hy2", Node: "b"},
+		{Tag: "tuic", Node: "b"},
+	}
+	if !reflect.DeepEqual(list, want) {
+		t.Errorf("sorted = %+v, want %+v", list, want)
+	}
+}
+
+func shadowsocksInbound(t *testing.T, tag string, multiplex bool) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"type": "shadowsocks", "tag": tag, "listen": "127.0.0.1", "listen_port": 0,
+		"method": "aes-128-gcm", "password": "test",
+		"multiplex": map[string]any{"enabled": multiplex},
+	}
+}
+
+// DisconnectUser on a real box: the options it judges multiplex by are the
+// ones each inbound was really built with, whether the box started with it or
+// it was added later. The tests above hand disconnect a lookup of their own;
+// with the real one miswired, or an inbound added with no recipe, every mux
+// warning would vanish and they would all still pass.
+func TestDisconnectUserReadsRunningOptions(t *testing.T) {
+	config, err := json.Marshal(map[string]any{
+		"log":      map[string]any{"disabled": true},
+		"inbounds": []any{shadowsocksInbound(t, "ss-boot", true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewCore()
+	if err := c.Start(config); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop() })
+	for tag, multiplex := range map[string]bool{"ss-hot": true, "ss-plain": false} {
+		raw, err := json.Marshal(shadowsocksInbound(t, tag, multiplex))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.AddInbound(raw); err != nil {
+			t.Fatalf("add %s: %v", tag, err)
+		}
+	}
+
+	box, err := c.running()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range []string{"ss-boot", "ss-hot", "ss-plain"} {
+		track(box.ConnTracker(), "alice", "1.1.1.1", 100, 100, t).Inbound = tag
+	}
+
+	result, err := c.DisconnectUser("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []UnclosableInbound{
+		{Tag: "ss-boot", Reason: UnclosableMux},
+		{Tag: "ss-hot", Reason: UnclosableMux},
+	}
+	if !reflect.DeepEqual(result.UnclosableInbounds, want) {
+		t.Errorf("UnclosableInbounds = %+v, want %+v", result.UnclosableInbounds, want)
+	}
+	if result.Connections != 3 {
+		t.Errorf("Connections = %d, want 3", result.Connections)
 	}
 }

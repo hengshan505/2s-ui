@@ -40,6 +40,14 @@ type UnclosableInbound struct {
 	Node string `json:"node,omitempty"`
 }
 
+// CompareUnclosable is the order of a report: this panel's own inbounds first,
+// then each node's, by tag within each. It is the one rule for both this
+// package's list and a master's merged one, so a list reads the same however
+// it was put together.
+func CompareUnclosable(a, b UnclosableInbound) int {
+	return cmp.Or(cmp.Compare(a.Node, b.Node), cmp.Compare(a.Tag, b.Tag))
+}
+
 // DisconnectResult is what disconnecting one user managed to do. It is sent as
 // DisconnectWire.
 //
@@ -54,9 +62,9 @@ type DisconnectResult struct {
 	// Sessions counts the multiplex / anytls sessions cut outright.
 	Sessions int `json:"sessions"`
 	// UnclosableInbounds names the inbounds where the user is likely still
-	// connected by a session this layer cannot reach, sorted by tag. Their
-	// routed connections are closed, but the client opens new streams on the
-	// session it still has.
+	// connected by a session this layer cannot reach, in CompareUnclosable
+	// order. Their routed connections are closed, but the client opens new
+	// streams on the session it still has.
 	UnclosableInbounds []UnclosableInbound `json:"unclosableInbounds,omitempty"`
 }
 
@@ -64,8 +72,14 @@ type DisconnectResult struct {
 // it carries every field along and not the MarshalJSON below.
 type disconnectFields DisconnectResult
 
-// DisconnectWire is DisconnectResult as it is sent: every field of it, so one
-// added there needs nothing here, plus the count.
+// DisconnectWire is DisconnectResult as it is sent. Its JSON is
+//
+//	connections, sessions, unclosableInbounds  -- every field of DisconnectResult
+//	unclosable                                 -- the count derived from the list
+//
+// The first three come from the embedded copy, so a field added to
+// DisconnectResult is sent with nothing to change here. They are fields of a
+// DisconnectWire too (w.Connections), though godoc lists only the count.
 type DisconnectWire struct {
 	disconnectFields
 	// Unclosable is len(UnclosableInbounds), for masters that predate the list:
@@ -183,8 +197,6 @@ func disconnect(conns userConns, inbounds []adapter.Inbound, user string, option
 			result.AddUnclosable(tag, UnclosableMux)
 		}
 	}
-	slices.SortFunc(result.UnclosableInbounds, func(a, b UnclosableInbound) int {
-		return cmp.Compare(a.Tag, b.Tag)
-	})
+	slices.SortFunc(result.UnclosableInbounds, CompareUnclosable)
 	return result
 }
