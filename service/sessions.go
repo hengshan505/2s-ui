@@ -216,57 +216,42 @@ func DisconnectLocalUser(user string) (core.DisconnectResult, error) {
 	return disconnectLocal(user)
 }
 
-// disconnectLocal kicks user off this panel's core, adding to Unclosable the
+// disconnectLocal kicks user off this panel's core, adding to the report the
 // multiplexed Shadowsocks inbounds the user was on. Shadowsocks has no copy in
 // core/protocol/, so its mux carrier is out of the core's reach: closing the
 // routed streams leaves the client opening new ones on the carrier it still
 // has -- the same limit the QUIC inbounds report.
+//
+// The inbounds are the ones the core saw the user on just before the kick. That
+// a client may use multiplex is not that it does, so this can over-warn; it
+// cannot see a carrier with no stream open on it either. A routed connection is
+// the only evidence there is.
 func disconnectLocal(user string) (core.DisconnectResult, error) {
-	// Read before the kick: the routed connections that show which inbounds
-	// the user was on are what the kick closes.
-	carriers := muxCarrierInbounds(user)
 	result, err := corePtr.DisconnectUser(user)
 	if err != nil {
 		return result, err
 	}
-	result.Unclosable += carriers
+	for _, tag := range muxCarriers(result.LiveInbounds) {
+		result.AddUnclosable(tag, core.UnclosableMux)
+	}
 	return result, nil
 }
 
-// muxCarrierInbounds counts the Shadowsocks inbounds with multiplex enabled
-// that user has a live connection on. That a client may use multiplex is not
-// that it does, so this can over-warn; it cannot see a carrier with no stream
-// open on it either. A routed connection is the only evidence there is.
-func muxCarrierInbounds(user string) int {
-	sessions, err := LocalSessions("user", user)
-	if err != nil || len(sessions) == 0 {
-		return 0
-	}
-	seen := make(map[string]struct{}, len(sessions))
-	var tags []string
-	for _, s := range sessions {
-		if _, ok := seen[s.Inbound]; !ok {
-			seen[s.Inbound] = struct{}{}
-			tags = append(tags, s.Inbound)
-		}
-	}
-	return countMuxCarriers(tags)
-}
-
-// countMuxCarriers counts the local Shadowsocks inbounds among tags that have
-// multiplex enabled.
-func countMuxCarriers(tags []string) int {
+// muxCarriers returns the local Shadowsocks inbounds among tags that have
+// multiplex enabled, sorted.
+func muxCarriers(tags []string) []string {
 	if len(tags) == 0 {
-		return 0
+		return nil
 	}
 	var inbounds []model.Inbound
 	err := database.GetDB().Model(model.Inbound{}).Select("tag", "options").
-		Where("type = ? AND tag IN ? AND node_id IS NULL", "shadowsocks", tags).Find(&inbounds).Error
+		Where("type = ? AND tag IN ? AND node_id IS NULL", "shadowsocks", tags).
+		Order("tag").Find(&inbounds).Error
 	if err != nil {
 		logger.Warning("disconnect: read inbounds: ", err)
-		return 0
+		return nil
 	}
-	count := 0
+	var carriers []string
 	for _, inbound := range inbounds {
 		var options struct {
 			Multiplex *struct {
@@ -274,10 +259,41 @@ func countMuxCarriers(tags []string) int {
 			} `json:"multiplex"`
 		}
 		if json.Unmarshal(inbound.Options, &options) == nil && options.Multiplex != nil && options.Multiplex.Enabled {
-			count++
+			carriers = append(carriers, inbound.Tag)
 		}
 	}
-	return count
+	return carriers
+}
+
+// nodeUnclosable labels the inbounds a node could not cut with the node's name.
+//
+// A node from before per-inbound reports sends the count alone -- one the bug
+// fixed with them (#234) can inflate. It still becomes one entry, naming the
+// node and no inbound, so the warning it used to raise is not silently lost.
+func nodeUnclosable(node string, remote core.DisconnectResult) []core.UnclosableInbound {
+	if len(remote.UnclosableInbounds) == 0 {
+		if remote.Unclosable > 0 {
+			return []core.UnclosableInbound{{Reason: core.UnclosableUnreported, Node: node}}
+		}
+		return nil
+	}
+	labelled := make([]core.UnclosableInbound, len(remote.UnclosableInbounds))
+	for i, u := range remote.UnclosableInbounds {
+		u.Node = node
+		labelled[i] = u
+	}
+	return labelled
+}
+
+// sortUnclosable puts this panel's own inbounds first, then each node's, so the
+// order does not depend on which node answered first.
+func sortUnclosable(list []core.UnclosableInbound) {
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Node != list[j].Node {
+			return list[i].Node < list[j].Node
+		}
+		return list[i].Tag < list[j].Tag
+	})
 }
 
 // DisconnectClusterUser drops a user's live connections here and on every
@@ -329,10 +345,14 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 			}
 			return remote, err
 		},
-		func(_ *model.Node, remote core.DisconnectResult) {
+		func(n *model.Node, remote core.DisconnectResult) {
 			result.Connections += remote.Connections
 			result.Sessions += remote.Sessions
-			result.Unclosable += remote.Unclosable
+			result.UnclosableInbounds = append(result.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
 		})
+	sortUnclosable(result.UnclosableInbounds)
+	// Recounted rather than summed: an older node's count stands for an
+	// unknown number of inbounds, and its whole report is one entry here.
+	result.Unclosable = len(result.UnclosableInbounds)
 	return result, nil
 }

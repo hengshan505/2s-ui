@@ -354,6 +354,23 @@ func (c *ConnTracker) Sessions(want func(info *ConnectionInfo) bool) []SessionIn
 	return sessions
 }
 
+// UserInbounds is the set of inbounds user has a routed connection on right
+// now. Only tags are collected, so unlike Sessions it formats nothing.
+func (c *ConnTracker) UserInbounds(user string) map[string]struct{} {
+	inbounds := make(map[string]struct{})
+	if user == "" {
+		return inbounds
+	}
+	c.access.Lock()
+	defer c.access.Unlock()
+	for _, connInfo := range c.connections {
+		if connInfo.User == user && connInfo.Inbound != "" {
+			inbounds[connInfo.Inbound] = struct{}{}
+		}
+	}
+	return inbounds
+}
+
 // CloseConnByUser closes every routed connection of one user. That is all it
 // can do: a multiplex or QUIC session keeps serving new streams after its
 // routed connections are gone, which is what Core.DisconnectUser is for.

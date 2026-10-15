@@ -67,7 +67,11 @@ func (h *Inbound) newSessionConnection(ctx context.Context, conn net.Conn, sourc
 }
 
 // KickUser cuts the sessions of a user who stays on the inbound -- see
-// Core.DisconnectUser.
+// Core.DisconnectUser. Unclosable is dropped for the reason UpdateUsers does not
+// check it: every session here is tracked with its transport, so what is left
+// is a straggler stream that reached the router after its session ended. That
+// put the user in the registry's seen set, which a kick never clears, so
+// counting it would report a QUIC session on every later kick (#234).
 func (h *Inbound) KickUser(user string) usersession.Result {
-	return h.sessions().KickUserSessions(user)
+	return usersession.Result{Cut: h.sessions().KickUserSessions(user).Cut}
 }

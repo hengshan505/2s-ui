@@ -47,7 +47,9 @@ func (h *Inbound) sessions() *usersession.Registry {
 }
 
 // KickUser cuts the sessions of a user who stays on the inbound -- see
-// Core.DisconnectUser.
+// Core.DisconnectUser. Unclosable is dropped for the reason UpdateUsers does not
+// check it: whatever it counts here is not a carrier, and Core.DisconnectUser
+// would report it as a QUIC session.
 func (h *Inbound) KickUser(user string) usersession.Result {
-	return h.sessions().KickUserSessions(user)
+	return usersession.Result{Cut: h.sessions().KickUserSessions(user).Cut}
 }

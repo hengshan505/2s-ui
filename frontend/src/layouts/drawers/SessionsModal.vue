@@ -15,6 +15,20 @@
         {{ $t('ui.sessNodeError', { node, err }) }}
       </div>
 
+      <!-- What the last Disconnect could not cut. It stays until the next one or
+           until the modal closes: a refresh lists routed connections, and these
+           sessions are the part a listing cannot show. -->
+      <div v-if="uncut.length" class="sess-warn">
+        {{ $t('ui.sessUnclosable') }}
+        <ul class="sess-uncut">
+          <!-- Each part isolated: a Latin tag next to an RTL reason would
+               otherwise be reordered into the neighbouring part under fa. -->
+          <li v-for="u in uncut" :key="[u.node, u.tag, u.reason].join('\n')">
+            <template v-for="(part, i) in uncutParts(u)" :key="i"><template v-if="i"> · </template><bdi>{{ part }}</bdi></template>
+          </li>
+        </ul>
+      </div>
+
       <div v-if="!loaded" style="padding: 20px 0;">
         <EmptyState icon="link" :title="$t('loading')" />
       </div>
@@ -135,6 +149,14 @@ type Session = {
   node?: string
 }
 
+// One inbound a Disconnect left a session on (core.UnclosableInbound). tag is
+// empty for a node too old to say which inbounds.
+type Uncut = {
+  tag?: string
+  reason: string
+  node?: string
+}
+
 // A busy client can hold thousands of connections; the newest are the ones an
 // operator is looking for, and rendering all of them every 5s is the cost.
 const MAX_ROWS = 300
@@ -146,8 +168,25 @@ const loaded = ref(false)
 const closing = ref(false)
 const sessions = ref<Session[]>([])
 const errors = ref<Record<string, string>>({})
+const uncut = ref<Uncut[]>([])
 const shown = computed(() => sessions.value.slice(0, MAX_ROWS))
 const hasNodes = computed(() => sessions.value.some((s) => s.node) || Object.keys(errors.value).length > 0)
+const uncutNodes = computed(() => hasNodes.value || uncut.value.some((u) => u.node))
+
+const uncutReason = (reason: string): string => {
+  switch (reason) {
+    case 'quic': return i18n.global.t('ui.sessUncutQuic')
+    case 'mux': return i18n.global.t('ui.sessUncutMux')
+    case 'unreported': return i18n.global.t('ui.sessUncutUnreported')
+    // A newer node's reason this panel has no words for: still better shown.
+    default: return reason
+  }
+}
+const uncutParts = (u: Uncut): string[] => [
+  uncutNodes.value ? (u.node || i18n.global.t('ui.sessLocal')) : '',
+  u.tag ?? '',
+  uncutReason(u.reason),
+].filter((v) => v)
 
 const readAuto = (): boolean => {
   try { return localStorage.getItem(AUTO_KEY) === 'true' } catch { return false }
@@ -178,13 +217,14 @@ const loadData = async () => {
 
 const disconnect = async () => {
   closing.value = true
+  uncut.value = []
   const msg = await HttpUtils.post('api/closeSessions', { u: props.name })
   closing.value = false
   if (!msg.success) return
   const r = msg.obj ?? {}
   push.success({ message: i18n.global.t('ui.sessDisconnected', { n: (r.connections ?? 0) + (r.sessions ?? 0) }) })
   if (r.localError) push.error({ message: i18n.global.t('ui.sessLocalError', { err: r.localError }) })
-  if ((r.unclosable ?? 0) > 0) push.warning({ message: i18n.global.t('ui.sessQuicLeft') })
+  uncut.value = r.unclosableInbounds ?? []
   for (const [node, err] of Object.entries(r.errors ?? {})) {
     push.error({ message: i18n.global.t('ui.sessNodeError', { node, err }) })
   }
@@ -215,6 +255,7 @@ watch(() => props.visible, (open) => {
     loaded.value = false
     sessions.value = []
     errors.value = {}
+    uncut.value = []
   }
   syncTimer()
 })
@@ -264,6 +305,11 @@ const since = (createdAt: number): string =>
   border-radius: 8px;
   padding: 8px 10px;
   margin-bottom: 10px;
+}
+.sess-uncut {
+  margin: 6px 0 0;
+  padding-inline-start: 18px;
+  overflow-wrap: anywhere;
 }
 .sess-table {
   border: 1px solid var(--line);

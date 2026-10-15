@@ -8,6 +8,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/shenaba/2s-ui/core"
 	"github.com/shenaba/2s-ui/database"
 	"github.com/shenaba/2s-ui/database/model"
 )
@@ -29,7 +30,7 @@ func installSessionsDB(t *testing.T) {
 
 // Only Shadowsocks with multiplex on keeps a carrier the core cannot reach;
 // the copied protocols cut theirs, and a node replica is not on this core.
-func TestCountMuxCarriers(t *testing.T) {
+func TestMuxCarriers(t *testing.T) {
 	installSessionsDB(t)
 	db := database.GetDB()
 	nodeID := uint(1)
@@ -46,11 +47,65 @@ func TestCountMuxCarriers(t *testing.T) {
 	}
 
 	all := []string{"ss-mux", "ss-mux-off", "ss-plain", "vless-mux", "ss-replica", "missing"}
-	if got := countMuxCarriers(all); got != 1 {
-		t.Errorf("countMuxCarriers = %d, want 1 (ss-mux only)", got)
+	if got := muxCarriers(all); !reflect.DeepEqual(got, []string{"ss-mux"}) {
+		t.Errorf("muxCarriers = %v, want [ss-mux]", got)
 	}
-	if got := countMuxCarriers(nil); got != 0 {
-		t.Errorf("countMuxCarriers(nil) = %d", got)
+	if got := muxCarriers(nil); got != nil {
+		t.Errorf("muxCarriers(nil) = %v", got)
+	}
+}
+
+// A node's inbounds are labelled with the node. One from before per-inbound
+// reports sends only the count, and its warning must not be lost on the way.
+func TestNodeUnclosable(t *testing.T) {
+	current := core.DisconnectResult{}
+	current.AddUnclosable("hy2", core.UnclosableQUIC)
+	current.AddUnclosable("ss", core.UnclosableMux)
+
+	for _, tc := range []struct {
+		name   string
+		remote core.DisconnectResult
+		want   []core.UnclosableInbound
+	}{
+		{"current node", current, []core.UnclosableInbound{
+			{Tag: "hy2", Reason: core.UnclosableQUIC, Node: "n1"},
+			{Tag: "ss", Reason: core.UnclosableMux, Node: "n1"},
+		}},
+		{"older node", core.DisconnectResult{Unclosable: 2}, []core.UnclosableInbound{
+			{Reason: core.UnclosableUnreported, Node: "n1"},
+		}},
+		{"nothing left", core.DisconnectResult{Connections: 4}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nodeUnclosable("n1", tc.remote); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("nodeUnclosable = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	if current.UnclosableInbounds[0].Node != "" {
+		t.Error("nodeUnclosable labelled the node's own slice in place")
+	}
+}
+
+// Nodes answer in any order; the list does not.
+func TestSortUnclosable(t *testing.T) {
+	list := []core.UnclosableInbound{
+		{Tag: "tuic", Node: "b"},
+		{Tag: "ss", Node: ""},
+		{Reason: core.UnclosableUnreported, Node: "a"},
+		{Tag: "hy2", Node: "b"},
+		{Tag: "hy2", Node: ""},
+	}
+	sortUnclosable(list)
+	want := []core.UnclosableInbound{
+		{Tag: "hy2", Node: ""},
+		{Tag: "ss", Node: ""},
+		{Reason: core.UnclosableUnreported, Node: "a"},
+		{Tag: "hy2", Node: "b"},
+		{Tag: "tuic", Node: "b"},
+	}
+	if !reflect.DeepEqual(list, want) {
+		t.Errorf("sorted = %+v\nwant     %+v", list, want)
 	}
 }
 
