@@ -38,22 +38,16 @@
       <Field :label="$t('ruleset.initialPath')">
         <input class="input mono" style="font-size: 12px;" v-model="initialPath" placeholder="/etc/sing-box/geosite-ads.srs" />
       </Field>
-      <!-- A shared client and a single outbound are alternatives: http_client
-           holds one or the other, so picking either clears the other. -->
-      <div class="grid2">
-        <Field :label="$t('httpClient.title')">
-          <Select v-model="httpClient">
-            <option value="">{{ $t('ui.none') }}</option>
-            <option v-for="c in httpClients" :key="c" :value="c">{{ c }}</option>
-          </Select>
-        </Field>
-        <Field :label="$t('objects.outbound')">
-          <Select v-model="downloadDetour">
-            <option value="">{{ $t('ui.none') }}</option>
-            <option v-for="o in outTags" :key="o" :value="o">{{ o }}</option>
-          </Select>
-        </Field>
-      </div>
+      <!-- One choice, always made: a shared client, an outbound, direct, or
+           the config's default client when it declares one. Naming none with
+           no default falls back to the implicit client sing-box 1.14
+           deprecated, so that is not on offer (see plugins/httpClient.ts). -->
+      <Field :label="$t('ruleset.download')">
+        <Select v-model="via">
+          <option v-if="via === ''" value="" disabled>{{ $t('ui.selectHint') }}</option>
+          <option v-for="o in viaOptions" :key="o.value" :value="o.value">{{ o.title }}</option>
+        </Select>
+      </Field>
       <Field :label="$t('ruleset.interval') + ' (' + $t('date.d') + ')'">
         <input class="input mono" type="number" min="0" v-model.number="updateIntervals" />
       </Field>
@@ -69,7 +63,8 @@ import Segmented from '@/components/ui/Segmented.vue'
 import Field from '@/components/ui/Field.vue'
 import RandomUtil from '@/plugins/randomUtil'
 import { ruleset } from '@/types/rules'
-import { downloadHttpClient, httpClientTags, refDetour, refTag } from '@/plugins/httpClient'
+import { useI18n } from 'vue-i18n'
+import { downloadClient, downloadOptions, downloadVia, initialDownloadVia, migrateDownloadDetour } from '@/plugins/httpClient'
 
 const props = defineProps<{
   open: boolean
@@ -86,6 +81,7 @@ const form = ref<ruleset>(<ruleset>{})
 function init() {
   if (props.index !== -1) {
     form.value = <ruleset>JSON.parse(props.data)
+    migrateDownloadDetour(form.value)
   } else {
     form.value = <ruleset>{ type: 'local', tag: 'rs-' + RandomUtil.randomSeq(3), format: 'binary' }
   }
@@ -95,42 +91,43 @@ watch(() => props.open, (v) => { if (v) init() })
 // switching type clears the fields of the other kind (legacy updateType)
 const kind = computed({
   get: () => form.value.type,
-  set: (t) => {
-    form.value.type = <'local' | 'remote'>t
-    if (t === 'local') {
+  set: (type) => {
+    const was = form.value.type
+    form.value.type = <'local' | 'remote'>type
+    if (type === 'local') {
       delete form.value.url
       delete form.value.http_client
       delete form.value.update_interval
       delete form.value.initial_path
     } else {
       delete form.value.path
+      // A remote set has to say how it downloads, so it starts out saying so
+      // -- once, not again when Remote is picked while already selected.
+      if (was !== 'remote') via.value = initialDownloadVia()
     }
   },
 })
 
-const httpClients = computed(() => httpClientTags())
+const { t } = useI18n()
 
-// Naming a shared client replaces any inline options: http_client is either a
-// tag or an options object, never both.
-const httpClient = computed({
-  get: () => refTag(form.value.http_client) ?? '',
+// Built from the stored client each time rather than remembered: every choice
+// but 'custom' is fully described by the client it writes.
+const via = computed({
+  get: () => downloadVia(form.value.http_client),
   set: (v: string) => {
-    if (v.length > 0) form.value.http_client = v
+    const client = downloadClient(v, form.value.http_client)
+    if (client !== undefined) form.value.http_client = client
     else delete form.value.http_client
   },
 })
 
-// The inline form, carrying only the outbound to download over. An outbound
-// that would dial exactly what no detour dials is dropped rather than written
-// out -- sing-box rejects that as pointless (see downloadHttpClient).
-const downloadDetour = computed({
-  get: () => refDetour(form.value.http_client) ?? '',
-  set: (v: string) => {
-    const client = v.length > 0 ? downloadHttpClient(v) : undefined
-    if (client) form.value.http_client = client
-    else delete form.value.http_client
-  },
-})
+const viaOptions = computed(() =>
+  downloadOptions(
+    props.outTags,
+    { defaultClient: t('ruleset.defaultClient'), direct: t('ruleset.direct'), custom: t('ruleset.customClient') },
+    form.value.http_client,
+  ),
+)
 
 // saveChanges emits the form as it stands, so an emptied field has to leave no
 // key rather than an empty string sing-box would read as a path.

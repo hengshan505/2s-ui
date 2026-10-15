@@ -175,6 +175,11 @@ func InitDB(dbPath string) error {
 	if err != nil {
 		return err
 	}
+	// After the repair, which can leave a rule-set with no client at all.
+	err = migrateExplicitRuleSetHTTPClients()
+	if err != nil {
+		return err
+	}
 	err = migrateHysteriaQUICFields()
 	if err != nil {
 		return err

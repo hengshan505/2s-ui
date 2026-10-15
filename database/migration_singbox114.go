@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/shenaba/2s-ui/database/model"
+	"github.com/shenaba/2s-ui/util"
 
 	"gorm.io/gorm"
 )
@@ -168,10 +169,17 @@ func migrateExperimentalSection(experimental map[string]any) int {
 // A detour to an optionless direct outbound is the one case that does not carry
 // over as a detour: download_detour set the internal disable_empty_direct_check
 // flag, which has no JSON field of its own, and without it sing-box rejects
-// such a detour as pointless. Downloading over the default outbound is what it
-// meant anyway, so the field is dropped -- but only for the outbounds
-// noopDetours actually names, not for anything tagged "direct". One carrying
-// bind_interface or a domain_resolver is a real routing choice.
+// such a detour as pointless. It becomes the direct client instead
+// (util.DirectHTTPClient) -- but only for the outbounds noopDetours actually
+// names, not for anything tagged "direct". One carrying bind_interface or a
+// domain_resolver is a real routing choice and keeps its detour.
+//
+// This used to drop the field, on the grounds that no detour meant the same.
+// It does not: with no client a rule-set falls back to the default client,
+// which with none declared rides the default outbound, so a set that had
+// downloaded directly started downloading over the proxy. Databases already
+// migrated that way cannot be told apart afterwards; see
+// migrateExplicitRuleSetHTTPClients.
 func migrateRouteSection(route map[string]any, noopDetours map[string]struct{}) int {
 	ruleSets, ok := route["rule_set"].([]any)
 	if !ok {
@@ -194,8 +202,12 @@ func migrateRouteSection(route map[string]any, noopDetours map[string]struct{}) 
 			changed++
 			continue
 		}
-		if _, noop := noopDetours[detour]; detour != "" && !noop {
-			ruleSet["http_client"] = map[string]any{"detour": detour}
+		if detour != "" {
+			if _, noop := noopDetours[detour]; noop {
+				ruleSet["http_client"] = util.DirectHTTPClient()
+			} else {
+				ruleSet["http_client"] = map[string]any{"detour": detour}
+			}
 		}
 		changed++
 	}

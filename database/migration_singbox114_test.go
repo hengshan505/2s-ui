@@ -3,6 +3,7 @@ package database
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -27,8 +28,9 @@ func openTestDB(t *testing.T) {
 		}
 	})
 	// Outbound is here because the rule-set migrations resolve a download
-	// detour against the outbound it names before deciding to drop it.
-	if err := db.AutoMigrate(&model.Setting{}, &model.Tls{}, &model.Outbound{}); err != nil {
+	// detour against the outbound it names before deciding to drop it, and
+	// Endpoint because route.final may name one.
+	if err := db.AutoMigrate(&model.Setting{}, &model.Tls{}, &model.Outbound{}, &model.Endpoint{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -73,8 +75,8 @@ func TestMigrateSingBox114Config(t *testing.T) {
 	if err := db.Create(&model.Setting{Key: "config", Value: legacy}).Error; err != nil {
 		t.Fatal(err)
 	}
-	// The detour named "direct" is dropped because this outbound carries no
-	// options, not because of what it is called.
+	// The detour named "direct" becomes the direct client because this outbound
+	// carries no options, not because of what it is called.
 	if err := db.Create(&model.Outbound{
 		Type: "direct", Tag: "direct", Options: json.RawMessage(`{}`),
 	}).Error; err != nil {
@@ -109,14 +111,15 @@ func TestMigrateSingBox114Config(t *testing.T) {
 	if !ok || len(ruleSets) != 3 {
 		t.Fatalf("expected 3 rule sets, got %v", ruleSets)
 	}
-	// A direct detour is what sing-box does anyway, and it cannot be expressed
-	// as an http_client detour, so it just goes away.
+	// The legacy field skipped sing-box's empty-direct check, so this one
+	// downloaded directly. A detour cannot say that, and no client would fall
+	// back to the default outbound, so it becomes the direct client.
 	direct, _ := ruleSets[0].(map[string]any)
 	if _, ok = direct["download_detour"]; ok {
 		t.Error("download_detour should have been replaced")
 	}
-	if _, ok = direct["http_client"]; ok {
-		t.Errorf("a direct detour must not become an http_client, got %v", direct)
+	if got := direct["http_client"]; !reflect.DeepEqual(got, map[string]any{"engine": "go"}) {
+		t.Errorf("a plain direct detour must become the direct client, got %v", direct)
 	}
 	if untouched, _ := ruleSets[1].(map[string]any); untouched["http_client"] != nil {
 		t.Error("rule sets without download_detour must be left alone")
@@ -259,8 +262,8 @@ func TestMigrateSingBox114KeepsConfiguredDirectDetour(t *testing.T) {
 		t.Errorf("unexpected http_client: %v", httpClient)
 	}
 	plain, _ := ruleSets[1].(map[string]any)
-	if _, hasClient := plain["http_client"]; hasClient {
-		t.Errorf("an optionless direct outbound is a no-op detour, got %v", plain)
+	if got := plain["http_client"]; !reflect.DeepEqual(got, map[string]any{"engine": "go"}) {
+		t.Errorf("an optionless direct outbound cannot be a detour, so it is the direct client, got %v", plain)
 	}
 }
 

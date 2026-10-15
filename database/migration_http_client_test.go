@@ -2,6 +2,7 @@ package database
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/shenaba/2s-ui/database/model"
@@ -58,9 +59,11 @@ func TestRepairRuleSetHTTPClients(t *testing.T) {
 		t.Fatalf("expected 4 rule sets, got %v", sets)
 	}
 
-	// Nothing worth keeping was left, so the whole block goes.
-	if _, ok := sets[0]["http_client"]; ok {
-		t.Errorf("a direct detour with no other option must drop http_client, got %v", sets[0])
+	// It downloaded directly; with nothing else left in the client it would
+	// count as none and fall back to the default outbound, so it becomes the
+	// direct client.
+	if got := sets[0]["http_client"]; !reflect.DeepEqual(got, map[string]any{"engine": "go"}) {
+		t.Errorf("a plain direct detour must become the direct client, got %v", sets[0])
 	}
 	// A real detour survives; only the unparseable flag is stripped.
 	fixed, ok := sets[1]["http_client"].(map[string]any)

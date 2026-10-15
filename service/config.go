@@ -140,9 +140,6 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = ensureDefaultHTTPClient(&singboxConfig); err != nil {
-		return nil, err
-	}
 	rawConfig, err := json.MarshalIndent(singboxConfig, "", "  ")
 	if err != nil {
 		return nil, err
@@ -150,162 +147,42 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 	return &rawConfig, nil
 }
 
-// defaultHTTPClientTag names the HTTP client remote rule-sets download over
-// when the operator has not set one up.
-const defaultHTTPClientTag = "default"
-
-// ensureDefaultHTTPClient declares an HTTP client for remote rule-sets that
-// name none, so sing-box 1.14 stops reporting the implicit fallback as
-// deprecated. It is added to the generated config rather than to the stored
-// one, so it also covers rule-sets added later.
+// checkRuleSetDownloads refuses a base config that leaves a remote rule-set on
+// either download form sing-box 1.14 deprecated and 1.16 removes: the legacy
+// download_detour, or no client at all with no default client declared, which
+// falls back to the implicit client riding the default outbound.
 //
-// The declared client has to reproduce the fallback, not merely replace it.
-// sing-box's implicit client is built with DefaultOutbound set, which dials
-// through the default outbound; that field has no JSON name (option/http.go),
-// so the only way to say the same thing in a config is a detour naming the
-// default outbound explicitly. Declaring a bare {"tag": "default"} instead
-// leaves DefaultOutbound false, and dialer.NewWithOptions then falls through to
-// a plain system dialer -- rule-set downloads would silently stop going through
-// the operator's egress.
+// The panel used to cover the second case when generating the config, by
+// declaring a client on route.final. That only reproduced the deprecated
+// behaviour under another name, and not when route.final was unset. Stored
+// configs were made explicit once (database.migrateExplicitRuleSetHTTPClients);
+// this keeps every later save, the API's included, from putting either back.
 //
-// Which outbound that is can only be named when route.final is set. Without it
-// sing-box picks the first outbound it created, which depends on creation order
-// the panel does not model, so the client is not declared at all and the
-// deprecation line stays -- a log line beats a wrong dial path.
-//
-// An operator who named a default themselves is left alone; one who only
-// declared clients still gets a default, since otherwise the rule-sets that
-// name none keep falling back.
-func ensureDefaultHTTPClient(config *SingBoxConfig) error {
-	if len(config.Route) == 0 {
+// A config the panel cannot read is not judged here: SaveConfig and then the
+// core refuse it on their own terms.
+func checkRuleSetDownloads(data json.RawMessage) error {
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
 		return nil
 	}
-	var route map[string]json.RawMessage
-	if err := json.Unmarshal(config.Route, &route); err != nil {
-		// A route section the panel cannot read is passed through untouched.
-		return nil
+	if tags := util.LegacyDownloadDetourRuleSets(root); len(tags) > 0 {
+		return common.NewErrorf("rule-set %s: download_detour is deprecated since sing-box 1.14, use http_client instead", quoteTags(tags))
 	}
-	if raw, ok := route["default_http_client"]; ok && !isEmptyRawJSON(raw) {
-		return nil
+	if tags := util.ImplicitHTTPClientRuleSets(root); len(tags) > 0 {
+		return common.NewErrorf("rule-set %s: no http_client and no default HTTP client to fall back on; sing-box 1.14 deprecated the implicit one, so choose how it downloads", quoteTags(tags))
 	}
-	if !hasImplicitHTTPClientRuleSet(route["rule_set"]) {
-		return nil
-	}
-	var finalTag string
-	if raw, ok := route["final"]; ok {
-		if err := json.Unmarshal(raw, &finalTag); err != nil {
-			return nil
-		}
-	}
-	if finalTag == "" {
-		return nil
-	}
-	// Endpoints count: sing-box resolves a detour through
-	// outbound.Manager.Outbound, which falls back to the endpoint manager, and
-	// route.final may name a wireguard or tailscale endpoint just as well as an
-	// outbound. Searching only outbounds would skip declaring the client for a
-	// perfectly valid config.
-	finalOutbound, found := outboundByTag(config.Outbounds, finalTag)
-	if !found {
-		finalOutbound, found = outboundByTag(config.Endpoints, finalTag)
-	}
-	if !found {
-		// route.final names nothing this config defines; sing-box will refuse
-		// it on its own terms, and guessing here would only add a second
-		// broken reference.
-		return nil
-	}
-
-	tagName := unusedHTTPClientTag(config.HTTPClients)
-	fields := map[string]string{"tag": tagName}
-	// A detour to a plain direct outbound is what sing-box rejects, and it is
-	// also what no detour already means, so it is left out.
-	if !util.IsPlainDirectOutbound(finalOutbound) {
-		fields["detour"] = finalTag
-	}
-	client, err := json.Marshal(fields)
-	if err != nil {
-		return err
-	}
-	tag, err := json.Marshal(tagName)
-	if err != nil {
-		return err
-	}
-	route["default_http_client"] = tag
-	encodedRoute, err := json.Marshal(route)
-	if err != nil {
-		return err
-	}
-	config.HTTPClients = append(config.HTTPClients, client)
-	config.Route = encodedRoute
 	return nil
 }
 
-// outboundByTag finds a generated outbound or endpoint by its tag. Both are
-// rendered in the same sing-box shape (type, tag, then the options), so one
-// lookup serves both lists.
-func outboundByTag(outbounds []json.RawMessage, tag string) (map[string]interface{}, bool) {
-	for _, raw := range outbounds {
-		var outbound map[string]interface{}
-		if err := json.Unmarshal(raw, &outbound); err != nil {
-			continue
+func quoteTags(tags []string) string {
+	quoted := ""
+	for i, tag := range tags {
+		if i > 0 {
+			quoted += ", "
 		}
-		if outboundTag, _ := outbound["tag"].(string); outboundTag == tag {
-			return outbound, true
-		}
+		quoted += strconv.Quote(tag)
 	}
-	return nil, false
-}
-
-// unusedHTTPClientTag names the added client without colliding with one the
-// operator declared.
-func unusedHTTPClientTag(clients []json.RawMessage) string {
-	taken := make(map[string]struct{}, len(clients))
-	for _, client := range clients {
-		var fields struct {
-			Tag string `json:"tag"`
-		}
-		if err := json.Unmarshal(client, &fields); err == nil && fields.Tag != "" {
-			taken[fields.Tag] = struct{}{}
-		}
-	}
-	tag := defaultHTTPClientTag
-	for i := 2; ; i++ {
-		if _, exists := taken[tag]; !exists {
-			return tag
-		}
-		tag = defaultHTTPClientTag + "-" + strconv.Itoa(i)
-	}
-}
-
-// hasImplicitHTTPClientRuleSet reports whether any remote rule-set would fall
-// back to the implicit default HTTP client.
-func hasImplicitHTTPClientRuleSet(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var ruleSets []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &ruleSets); err != nil {
-		return false
-	}
-	for _, ruleSet := range ruleSets {
-		var ruleSetType string
-		if err := json.Unmarshal(ruleSet["type"], &ruleSetType); err != nil || ruleSetType != "remote" {
-			continue
-		}
-		if httpClient, ok := ruleSet["http_client"]; !ok || isEmptyRawJSON(httpClient) {
-			return true
-		}
-	}
-	return false
-}
-
-func isEmptyRawJSON(raw json.RawMessage) bool {
-	switch string(raw) {
-	case "", "null", `""`, "{}", "[]":
-		return true
-	}
-	return false
+	return quoted
 }
 
 // StartCore starts the core if it is down, waiting for whatever holds startMu:
@@ -657,6 +534,9 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	case "endpoints":
 		restartCore, err = s.EndpointService.Save(tx, act, data)
 	case "config":
+		if err = checkRuleSetDownloads(data); err != nil {
+			return nil, err
+		}
 		err = s.SettingService.SaveConfig(tx, data)
 		if err != nil {
 			return nil, err

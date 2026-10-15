@@ -62,202 +62,62 @@ func TestSingBoxConfigOmitsEmptyCertificateProviders(t *testing.T) {
 	}
 }
 
-func routeOf(t *testing.T, config SingBoxConfig) map[string]any {
-	t.Helper()
-	var route map[string]any
-	if len(config.Route) == 0 {
-		return route
-	}
-	if err := json.Unmarshal(config.Route, &route); err != nil {
-		t.Fatal(err)
-	}
-	return route
-}
-
-func decodeConfig(t *testing.T, raw string) SingBoxConfig {
-	t.Helper()
-	var config SingBoxConfig
-	if err := json.Unmarshal([]byte(raw), &config); err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureDefaultHTTPClient(&config); err != nil {
-		t.Fatal(err)
-	}
-	return config
-}
-
-// A remote rule-set with no client of its own downloads over the implicit
-// default, which sing-box 1.14 deprecates. The declared replacement has to keep
-// dialing through the same outbound: the implicit client sets DefaultOutbound,
-// which has no JSON field, so the only way to say it is a detour naming
-// route.final. Without one the download would silently go out directly.
-func TestEnsureDefaultHTTPClient(t *testing.T) {
-	config := decodeConfig(t, `{
-		"outbounds": [{"type": "selector", "tag": "proxy", "outbounds": ["a"]}],
-		"route": {"final": "proxy", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
-		]}
-	}`)
-
-	if len(config.HTTPClients) != 1 {
-		t.Fatalf("expected one declared http client, got %v", config.HTTPClients)
-	}
-	var client map[string]any
-	if err := json.Unmarshal(config.HTTPClients[0], &client); err != nil {
-		t.Fatal(err)
-	}
-	if client["tag"] != defaultHTTPClientTag || client["detour"] != "proxy" || len(client) != 2 {
-		t.Errorf("unexpected client: %v", client)
-	}
-	if routeOf(t, config)["default_http_client"] != defaultHTTPClientTag {
-		t.Errorf("the route must point at it, got %v", routeOf(t, config))
-	}
-}
-
-// sing-box refuses a detour to a direct outbound carrying no options, and no
-// detour already means the same thing, so that is the one case with no detour.
-func TestEnsureDefaultHTTPClientOmitsNoopDetour(t *testing.T) {
-	config := decodeConfig(t, `{
-		"outbounds": [{"type": "direct", "tag": "direct"}],
-		"route": {"final": "direct", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
-		]}
-	}`)
-
-	if len(config.HTTPClients) != 1 {
-		t.Fatalf("expected one declared http client, got %v", config.HTTPClients)
-	}
-	var client map[string]any
-	if err := json.Unmarshal(config.HTTPClients[0], &client); err != nil {
-		t.Fatal(err)
-	}
-	if client["tag"] != defaultHTTPClientTag || len(client) != 1 {
-		t.Errorf("a no-op detour must be left out, got %v", client)
-	}
-}
-
-// A direct outbound with dialer options is not a no-op, so the detour stays.
-func TestEnsureDefaultHTTPClientKeepsConfiguredDirect(t *testing.T) {
-	config := decodeConfig(t, `{
-		"outbounds": [{"type": "direct", "tag": "direct", "bind_interface": "eth1"}],
-		"route": {"final": "direct", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
-		]}
-	}`)
-
-	var client map[string]any
-	if err := json.Unmarshal(config.HTTPClients[0], &client); err != nil {
-		t.Fatal(err)
-	}
-	if client["detour"] != "direct" {
-		t.Errorf("a direct outbound with dialer options is a real detour, got %v", client)
-	}
-}
-
-// route.final may name an endpoint rather than an outbound -- wireguard, warp
-// and tailscale all sit on the panel's Endpoints page -- and sing-box resolves a
-// detour through outbound.Manager.Outbound, which falls back to the endpoint
-// manager. Searching only outbounds would skip declaring the client on a
-// perfectly valid config and leave the deprecation warning this function exists
-// to silence.
-func TestEnsureDefaultHTTPClientResolvesAnEndpoint(t *testing.T) {
-	config := decodeConfig(t, `{
-		"endpoints": [{"type": "wireguard", "tag": "wg-out", "address": ["10.0.0.2/32"]}],
-		"route": {"final": "wg-out", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
-		]}
-	}`)
-
-	if len(config.HTTPClients) != 1 {
-		t.Fatalf("expected one declared http client, got %v", config.HTTPClients)
-	}
-	var client map[string]any
-	if err := json.Unmarshal(config.HTTPClients[0], &client); err != nil {
-		t.Fatal(err)
-	}
-	if client["detour"] != "wg-out" {
-		t.Errorf("the detour must name the endpoint route.final points at, got %v", client)
-	}
-}
-
-func TestEnsureDefaultHTTPClientLeavesConfigsAlone(t *testing.T) {
+// A save may not leave a remote rule-set on either download form sing-box 1.14
+// deprecated: the implicit default client, reached by naming no client while
+// the config declares no default, or the legacy download_detour.
+func TestCheckRuleSetDownloadsRefuses(t *testing.T) {
 	for name, raw := range map[string]string{
-		"rule-set names its own client": `{"route": {"rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": {"detour": "proxy"}}
-		]}}`,
-		"local rule-set only": `{"route": {"rule_set": [
-			{"type": "local", "tag": "a", "path": "/a.srs"}
-		]}}`,
-		"no rule-set": `{"route": {"rules": []}}`,
-		"no route":    `{"log": {"level": "info"}}`,
-		"default already set": `{"route": {"default_http_client": "mine", "rule_set": [
+		"no client, no default": `{"route": {"rule_set": [
 			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
 		]}}`,
-		// Without route.final the default outbound is whichever sing-box
-		// created first, which the panel does not model -- a wrong dial path is
-		// worse than the deprecation line, so nothing is declared.
-		"no final": `{"route": {"rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
+		// IsEmpty compares the whole options struct against zero, so a client
+		// holding only zero values is as good as none.
+		"zero-valued inline client": `{"route": {"rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": {"detour": "", "headers": {}}}
 		]}}`,
-		"final names nothing": `{"route": {"final": "gone", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
+		"empty tag": `{"route": {"rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": ""}
+		]}}`,
+		"legacy download_detour": `{"route": {"rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "download_detour": "proxy"}
+		]}}`,
+		"legacy download_detour beside a client": `{"route": {"rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "download_detour": "proxy", "http_client": {"detour": "proxy"}}
 		]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			config := decodeConfig(t, raw)
-			for _, client := range config.HTTPClients {
-				var decoded map[string]any
-				if err := json.Unmarshal(client, &decoded); err != nil {
-					t.Fatal(err)
-				}
-				if decoded["tag"] == defaultHTTPClientTag {
-					t.Errorf("no client should have been declared, got %v", decoded)
-				}
+			err := checkRuleSetDownloads(json.RawMessage(raw))
+			if err == nil {
+				t.Fatal("expected the config to be refused")
 			}
-			if got := routeOf(t, config)["default_http_client"]; got != nil && got != "mine" {
-				t.Errorf("unexpected default_http_client: %v", got)
+			if !strings.Contains(err.Error(), `"a"`) {
+				t.Errorf("the error must name the rule-set, got %v", err)
 			}
 		})
 	}
 }
 
-// Declaring clients without naming a default still leaves bare rule-sets
-// falling back, so one is added beside them rather than skipped.
-func TestEnsureDefaultHTTPClientAppends(t *testing.T) {
-	config := decodeConfig(t, `{
-		"outbounds": [{"type": "selector", "tag": "proxy", "outbounds": ["a"]}],
-		"http_clients": [{"tag": "over-proxy", "detour": "proxy"}],
-		"route": {"final": "proxy", "rule_set": [
-			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"},
-			{"type": "remote", "tag": "b", "url": "https://e.com/b.srs", "http_client": "over-proxy"}
-		]}
-	}`)
-
-	if len(config.HTTPClients) != 2 {
-		t.Fatalf("the operator's client must be kept alongside the added one, got %v", config.HTTPClients)
-	}
-	if routeOf(t, config)["default_http_client"] != defaultHTTPClientTag {
-		t.Errorf("expected the added client as default, got %v", routeOf(t, config)["default_http_client"])
-	}
-}
-
-// The added client must not take a tag the operator already used.
-func TestEnsureDefaultHTTPClientAvoidsTagCollision(t *testing.T) {
-	config := decodeConfig(t, `{
-		"outbounds": [{"type": "selector", "tag": "proxy", "outbounds": ["a"]}],
-		"http_clients": [{"tag": "default", "detour": "proxy"}],
-		"route": {"final": "proxy", "rule_set": [{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}]}
-	}`)
-
-	got := routeOf(t, config)["default_http_client"]
-	if got == defaultHTTPClientTag {
-		t.Fatalf("the added client must not reuse the operator's tag, got %v", got)
-	}
-	var added map[string]any
-	if err := json.Unmarshal(config.HTTPClients[len(config.HTTPClients)-1], &added); err != nil {
-		t.Fatal(err)
-	}
-	if added["tag"] != got {
-		t.Errorf("the route must point at the added client, got %v and %v", got, added)
+func TestCheckRuleSetDownloadsAccepts(t *testing.T) {
+	for name, raw := range map[string]string{
+		"detour":        `{"route": {"rule_set": [{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": {"detour": "proxy"}}]}}`,
+		"direct client": `{"route": {"rule_set": [{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": {"engine": "go"}}]}}`,
+		"shared client": `{"http_clients": [{"tag": "dl"}], "route": {"rule_set": [{"type": "remote", "tag": "a", "url": "https://e.com/a.srs", "http_client": "dl"}]}}`,
+		// The first declared client is the default when none is named
+		// (httpclient.NewManager), and following it is not the implicit one.
+		"first declared client is the default": `{"http_clients": [{"tag": "dl"}], "route": {"rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
+		]}}`,
+		"named default": `{"route": {"default_http_client": "dl", "rule_set": [
+			{"type": "remote", "tag": "a", "url": "https://e.com/a.srs"}
+		]}}`,
+		"local rule-set": `{"route": {"rule_set": [{"type": "local", "tag": "a", "path": "/a.srs"}]}}`,
+		"no rule-set":    `{"route": {"rules": []}}`,
+		"no route":       `{"log": {"level": "info"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkRuleSetDownloads(json.RawMessage(raw)); err != nil {
+				t.Errorf("expected the config to pass, got %v", err)
+			}
+		})
 	}
 }

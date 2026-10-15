@@ -111,7 +111,7 @@
             icon="rules"
             :rows="[
               { k: $t('ruleset.format'), v: item.format, mono: true },
-              { k: $t('objects.outbound'), v: item.download_detour ?? $t('ui.none'), mono: !!item.download_detour },
+              { k: $t('ruleset.download'), ...downloadRow(item) },
               { k: $t('actions.update'), v: item.update_interval ?? $t('ui.none'), mono: !!item.update_interval },
             ]"
           >
@@ -176,6 +176,8 @@ import { Config } from '@/types/config'
 import { actionKeys, ruleset } from '@/types/rules'
 import { FindDiff } from '@/plugins/utils'
 import { useReorder } from '@/plugins/useReorder'
+import { downloadVia } from '@/plugins/httpClient'
+import { useI18n } from 'vue-i18n'
 import Btn from '@/components/ui/Btn.vue'
 import Ico from '@/components/ui/Ico.vue'
 import Pop from '@/components/ui/Pop.vue'
@@ -252,6 +254,23 @@ const rulesets = computed((): any[] => {
 const rulesetTags = computed((): string[] => rulesets.value.map((rs: any) => rs.tag))
 
 const outboundTags = computed((): string[] => Data().outboundTags)
+
+const { t } = useI18n()
+
+// How a rule-set downloads, for its card. Only a remote one downloads at all;
+// a tag is shown as it is, a kind of client in words.
+const downloadRow = (item: any): { v: string; mono: boolean } => {
+  if (item.type !== 'remote') return { v: t('ui.none'), mono: false }
+  const via = downloadVia(item.http_client)
+  if (via.startsWith('out:')) return { v: via.slice('out:'.length), mono: true }
+  if (via.startsWith('client:')) return { v: via.slice('client:'.length), mono: true }
+  switch (via) {
+    case 'default': return { v: t('ruleset.defaultClient'), mono: false }
+    case 'direct': return { v: t('ruleset.direct'), mono: false }
+    case 'custom': return { v: t('ruleset.customClient'), mono: false }
+  }
+  return { v: t('ui.none'), mono: false }
+}
 
 const inboundTags = computed((): string[] => Data().inboundTags)
 

@@ -147,7 +147,7 @@
             <option value="6">6</option>
           </Select>
           <div v-else-if="kindOf(k) === 'bool'" style="display: flex; align-items: center; height: 38px;">
-            <Toggle :model-value="!!r[k]" @update:model-value="r[k] = $event" />
+            <SwitchLabel :label="$t(BOOL_LABELS[k])" :model-value="!!r[k]" @update:model-value="r[k] = $event" />
           </div>
           <textarea
             v-else
@@ -189,7 +189,6 @@ import Field from '@/components/ui/Field.vue'
 import Btn from '@/components/ui/Btn.vue'
 import Ico from '@/components/ui/Ico.vue'
 import IconBtn from '@/components/ui/IconBtn.vue'
-import Toggle from '@/components/ui/Toggle.vue'
 import ChipSelect from '@/components/ui/ChipSelect.vue'
 import SwitchLabel from '@/components/ui/SwitchLabel.vue'
 import SectionLabel from '@/components/ui/SectionLabel.vue'
@@ -227,6 +226,12 @@ const PLACEHOLDER: Record<string, string> = {
   process_name: 'chrome.exe', clash_mode: 'global',
 }
 const BOOL_KEYS = ['ip_is_private', 'source_ip_is_private', 'rule_set_ip_cidr_match_source']
+// A bare switch beside a key name said nothing about what turning it on does.
+const BOOL_LABELS: Record<string, string> = {
+  ip_is_private: 'rule.privateIp',
+  source_ip_is_private: 'rule.srcPrivateIp',
+  rule_set_ip_cidr_match_source: 'rule.rulesetMatchSrc',
+}
 const NUM_KEYS = ['port', 'source_port']
 // A comma is legal regex syntax, so these split on newlines only: comma
 // splitting tore a bounded repeat like `a{2,4}` into two entries that matched

@@ -153,10 +153,9 @@
               <option value="binary">binary</option>
             </Select>
           </Field>
-          <Field :label="$t('objects.outbound')" :mb="0">
-            <Select v-model="importDetour">
-              <option value="">{{ $t('ui.none') }}</option>
-              <option v-for="o in outTags" :key="o" :value="o">{{ o }}</option>
+          <Field :label="$t('ruleset.download')" :mb="0">
+            <Select v-model="importVia">
+              <option v-for="o in importViaOptions" :key="o.value" :value="o.value">{{ o.title }}</option>
             </Select>
           </Field>
           <Field :label="$t('ruleset.interval') + ' (' + $t('date.d') + ')'" :mb="0">
@@ -228,6 +227,7 @@ import Field from '@/components/ui/Field.vue'
 import IconBtn from '@/components/ui/IconBtn.vue'
 import MHint from '@/components/ui/MHint.vue'
 import SectionLabel from '@/components/ui/SectionLabel.vue'
+import { downloadClient, downloadOptions, initialDownloadVia, migrateDownloadDetour } from '@/plugins/httpClient'
 
 interface ImportItem { tag: string; url: string; format: string; exists: boolean }
 
@@ -287,6 +287,9 @@ function extractRouteBlock(obj: any): any {
 }
 
 function setParsed(block: any) {
+  // A route block copied from elsewhere may still carry the legacy field,
+  // which the panel no longer saves.
+  if (Array.isArray(block.rule_set)) block.rule_set.forEach(migrateDownloadDetour)
   parsed.value = block
   importMode.value = hasConflicts.value ? 'merge' : 'replace'
   applyFinal.value = false
@@ -354,9 +357,17 @@ function saveRules() {
 const rsTab = ref('text')
 const importRawText = ref('')
 const importFormat = ref('binary')
-const importDetour = ref('')
+const importVia = ref(initialDownloadVia())
 const importInterval = ref(1)
 const importPreview = ref<ImportItem[]>([])
+
+const importViaOptions = computed(() =>
+  downloadOptions(props.outTags, {
+    defaultClient: t('ruleset.defaultClient'),
+    direct: t('ruleset.direct'),
+    custom: t('ruleset.customClient'),
+  }),
+)
 
 const importSkipped = computed(() => importPreview.value.filter((i) => i.exists).length)
 const newCount = computed(() => importPreview.value.filter((i) => !i.exists).length)
@@ -398,7 +409,8 @@ async function onRulesetsFile(event: Event) {
 function saveRulesets() {
   const toAdd = importPreview.value.filter((i) => !i.exists).map((item) => {
     const rs: any = { type: 'remote', tag: item.tag, format: item.format, url: item.url }
-    if (importDetour.value) rs.download_detour = importDetour.value
+    const client = downloadClient(importVia.value)
+    if (client !== undefined) rs.http_client = client
     if (importInterval.value > 0) rs.update_interval = importInterval.value + 'd'
     return rs
   })
@@ -411,7 +423,7 @@ watch(() => props.open, (v) => {
     tab.value = 'json'
     rsTab.value = 'text'
     importFormat.value = 'binary'
-    importDetour.value = ''
+    importVia.value = initialDownloadVia()
     importInterval.value = 1
     tabChanged()
     rsTabChanged()

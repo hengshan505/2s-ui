@@ -752,6 +752,7 @@ export default {
     portRange: "端口范围",
     srcCidr: "源 IP CIDR",
     srcPrivateIp: "匹配非公开源 IP",
+    queryDnssec: "匹配 DNSSEC OK 查询",
     srcPort: "源端口",
     srcPortRange: "源端口范围",
     ruleset: "规则集",
@@ -821,6 +822,10 @@ export default {
     interval: "更新间隔",
     remote: "远程",
     local: "本地",
+    download: "下载方式",
+    direct: "直连",
+    defaultClient: "默认客户端",
+    customClient: "内联配置",
   },
   dns: {
     add: "添加 DNS 服务器",

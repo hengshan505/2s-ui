@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/shenaba/2s-ui/database/model"
+	"github.com/shenaba/2s-ui/util"
 
 	"gorm.io/gorm"
 )
@@ -21,10 +22,15 @@ const migratedKeyHTTPClientFix = "migratedHTTPClientFix"
 //   - a detour to an optionless direct outbound, which sing-box refuses as
 //     pointless because it dials exactly what it would have dialled anyway. A
 //     direct outbound that carries dialer options is not one of those and keeps
-//     its detour.
+//     its detour. The rest is the direct client (util.DirectHTTPClient).
 //
 // Both come from an earlier rewrite of the deprecated download_detour option,
 // which set the internal flag rather than exposing it.
+//
+// This used to drop such a client altogether, which left the rule-set falling
+// back to the default outbound rather than downloading directly as it had.
+// Databases already repaired that way cannot be told apart afterwards; see
+// migrateExplicitRuleSetHTTPClients, which runs after this.
 func repairRuleSetHTTPClients() error {
 	var flag model.Setting
 	err := db.Where("key = ?", migratedKeyHTTPClientFix).First(&flag).Error
@@ -130,10 +136,11 @@ func repairRuleSetList(route map[string]any, noopDetours map[string]struct{}) in
 		if !fixed {
 			continue
 		}
-		// An http_client with nothing left in it means the defaults, which is
-		// what leaving it out says more clearly.
-		if len(httpClient) == 0 {
-			delete(ruleSet, "http_client")
+		// With the detour gone a client still dials directly, unless nothing is
+		// left in it: an empty one counts as no client, which falls back to the
+		// default outbound. That one becomes the direct client.
+		if util.IsEmptyHTTPClient(httpClient) {
+			ruleSet["http_client"] = util.DirectHTTPClient()
 		}
 		changed++
 	}
