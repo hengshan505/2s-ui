@@ -19,14 +19,10 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 25
+      # Also builds the subscriber dashboard into frontend/subscriber/dist.
       - name: Install dependencies and build frontend
         run: |
           cd frontend
-          npm install
-          npm run build
-      - name: Build subscriber dashboard
-        run: |
-          cd frontend/subscriber
           npm install
           npm run build
       - name: Upload frontend build artifact

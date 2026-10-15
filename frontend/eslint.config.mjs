@@ -6,7 +6,7 @@ import globals from 'globals'
 export default tseslint.config(
   {
     // 取代旧 --ignore-path .gitignore
-    ignores: ['dist/**', 'node_modules/**'],
+    ignores: ['dist/**', 'subscriber/dist/**', 'node_modules/**'],
   },
 
   js.configs.recommended,

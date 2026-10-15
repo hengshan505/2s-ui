@@ -33,6 +33,10 @@ updates:
   # Carried over from the frontend repo when it was inlined. Without this entry
   # the frontend's npm deps simply stop being updated -- the gomod entry above
   # does not cover them, and the frontend repo's own config no longer applies.
+  #
+  # This also covers the subscriber dashboard (frontend/subscriber): it is a
+  # second bundle of the same npm project, not a project of its own, so its
+  # vue ships at the version this entry keeps current.
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
@@ -44,9 +48,12 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    # typescript is the one major dependabot can never land here on its own:
-    # typescript-eslint pins `typescript >=4.8.4 <6.1.0` and has not moved as
-    # of 8.65.0, so the typescript 7 bump could not even get past install.
+    # typescript is the one major dependabot can never land here on its own,
+    # for two independent reasons. typescript-eslint pins
+    # `typescript >=4.8.4 <6.1.0` and has not moved as of 8.65.0, so the bump
+    # could not even get past install. And vue-tsc (3.3.13) loads
+    # `typescript/lib/tsc`, which typescript 7 no longer exports -- its peer
+    # range says `>=5.0.0`, so that one passes install and fails the build.
     #
     # Kept to that single package on purpose. `ignore` suppresses security
     # update PRs as well as version ones, and most of these dependencies ship
@@ -56,19 +63,3 @@ updates:
       - dependency-name: "typescript"
         update-types:
           - "version-update:semver-major"
-  # The subscriber dashboard is a second npm project with its own lockfile, and
-  # the entry above does not reach it: vue ships inside a page every subscriber
-  # can open, and nothing was updating it. No typescript ignore here -- the pin
-  # that forces one above comes from typescript-eslint, which this project does
-  # not use.
-  - package-ecosystem: "npm"
-    directory: "/frontend/subscriber"
-    schedule:
-      interval: "daily"
-    groups:
-      subscriber:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"

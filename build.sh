@@ -18,14 +18,10 @@ mkdir -p web/html
 rm -fr web/html/*
 cp -R frontend/dist/* web/html/
 
-# Subscriber dashboard: served to browsers at the subscription URL. Built and
-# embedded under sub/dashboard (go:embed). A minimal fallback index.html is
-# committed so the package still compiles if this frontend hasn't been built.
-echo "Subscriber dashboard"
-cd frontend/subscriber
-npm i
-npm run build
-cd ../..
+# Subscriber dashboard: served to browsers at the subscription URL. `npm run
+# build` above already built it into frontend/subscriber/dist; it is embedded
+# under sub/dashboard (go:embed). A minimal fallback page is committed so the
+# package still compiles if this frontend hasn't been built.
 rm -fr sub/dashboard/index.html sub/dashboard/assets
 cp -R frontend/subscriber/dist/* sub/dashboard/
 

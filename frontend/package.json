@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "vite --host",
-    "build": "vue-tsc --noEmit && vite build",
+    "dev:subscriber": "vite -c subscriber/vite.config.mts",
+    "build": "vue-tsc --noEmit && vite build && npm run build:subscriber",
+    "build:subscriber": "vue-tsc --noEmit -p subscriber/tsconfig.json && vite build -c subscriber/vite.config.mts",
     "preview": "vite preview",
     "lint": "eslint . --fix"
   },

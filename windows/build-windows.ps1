@@ -80,30 +80,9 @@ if (!(Test-Path "web\html")) {
 Write-Host "Copying frontend build files..." -ForegroundColor Yellow
 Copy-Item "frontend\dist\*" "web\html\" -Recurse -Force
 
-# Build the subscriber dashboard and embed it (sub/dashboard is go:embed'ed).
-# Without this the binary ships the committed fallback placeholder page.
-Write-Host "Building subscriber dashboard..." -ForegroundColor Yellow
-Push-Location "frontend\subscriber"
-
-try {
-    npm install
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install subscriber dependencies"
-    }
-
-    npm run build
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to build subscriber dashboard"
-    }
-} catch {
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pop-Location
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Pop-Location
-
+# Embed the subscriber dashboard (sub/dashboard is go:embed'ed); the frontend
+# build above already built it into frontend\subscriber\dist. Without this the
+# binary ships the committed fallback placeholder page.
 Write-Host "Copying subscriber build files..." -ForegroundColor Yellow
 # Clear the previous build first, the way build.sh does: every emitted file is
 # content-hashed, so copying over the old one leaves unreachable bundles behind

@@ -1,8 +1,8 @@
 FROM --platform=$BUILDPLATFORM node:alpine AS front-builder
 WORKDIR /app
 COPY frontend/ ./
+# Builds the panel and the subscriber dashboard (frontend/subscriber) both.
 RUN npm install && npm run build
-RUN cd subscriber && npm install && npm run build
 
 FROM golang:1.26-alpine AS backend-builder
 WORKDIR /app
