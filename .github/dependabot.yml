@@ -56,3 +56,19 @@ updates:
       - dependency-name: "typescript"
         update-types:
           - "version-update:semver-major"
+  # The subscriber dashboard is a second npm project with its own lockfile, and
+  # the entry above does not reach it: vue ships inside a page every subscriber
+  # can open, and nothing was updating it. No typescript ignore here -- the pin
+  # that forces one above comes from typescript-eslint, which this project does
+  # not use.
+  - package-ecosystem: "npm"
+    directory: "/frontend/subscriber"
+    schedule:
+      interval: "daily"
+    groups:
+      subscriber:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

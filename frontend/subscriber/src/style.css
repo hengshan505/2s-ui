@@ -24,6 +24,52 @@ body {
   gap: 18px;
 }
 
+.toolbar {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -6px;
+}
+
+.lang {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.lang-icon {
+  position: absolute;
+  inset-inline-start: 10px;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: #8b93b8;
+  stroke-width: 1.6;
+  pointer-events: none;
+}
+
+/* Native on purpose: on a phone it opens the system picker, which is where
+   most subscribers land. The arrow is the platform's; only the box is styled. */
+.lang-select {
+  font: inherit;
+  font-size: 13px;
+  color: #dde2f5;
+  background: rgba(22, 26, 46, 0.85);
+  border: 1px solid #2a3052;
+  border-radius: 9px;
+  padding: 6px 10px;
+  padding-inline-start: 32px;
+  cursor: pointer;
+}
+.lang-select:hover {
+  background: rgba(40, 46, 76, 0.9);
+}
+.lang-select:focus-visible {
+  outline: 2px solid #4f7cff;
+  outline-offset: 2px;
+}
+
 .card {
   width: 100%;
   max-width: 560px;
@@ -242,6 +288,12 @@ body {
 .foot {
   font-size: 12px;
   color: #5b6285;
+}
+
+/* Spacing out Arabic-script letters breaks the joins between them. */
+:lang(fa) .stat-label,
+:lang(fa) .links-title {
+  letter-spacing: 0;
 }
 
 @media (max-width: 480px) {
