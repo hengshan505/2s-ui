@@ -38,6 +38,10 @@ const Data = defineStore('Data', {
     // per inbound by the core, so it is NOT the sum of its clients' totals: a
     // client on several inbounds carries one figure across all of them.
     inboundTraffic: <Record<string, number>>{},
+    // client name -> bytes per second over the last stats window (10s). Only
+    // clients that moved traffic through this panel's own core appear, so a
+    // client served by a node alone has no entry.
+    clientRates: <Record<string, { up: number, down: number }>>{},
   }),
   getters: {
     // Detour and route targets, inbound side: every inbound plus the endpoints
@@ -78,6 +82,7 @@ const Data = defineStore('Data', {
       if (Object.hasOwn(obj, 'ipCounts')) this.ipCounts = obj.ipCounts ?? {}
       if (Object.hasOwn(obj, 'clusterIpActive')) this.clusterIpActive = !!obj.clusterIpActive
       if (Object.hasOwn(obj, 'inboundTraffic')) this.inboundTraffic = obj.inboundTraffic ?? {}
+      if (Object.hasOwn(obj, 'clientRates')) this.clientRates = obj.clientRates ?? {}
       // Client traffic is rewritten every stats flush without marking a config
       // change, so the client list rides the live payload too -- waiting for the
       // next full payload would freeze the traffic columns on a panel where

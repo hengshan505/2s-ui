@@ -94,6 +94,10 @@ func (s *PanelDataService) onlinesHalf() (map[string]interface{}, error) {
 	// with traffic, not with config, so carrying it on the config half would
 	// freeze it until the next save.
 	data["inboundTraffic"] = s.StatsService.GetInboundTraffic()
+	// Always sent, even empty, for the same reason as ipCounts: a missing key
+	// reads as "unchanged", which would keep the last rates on screen after
+	// everyone stopped.
+	data["clientRates"] = s.StatsService.GetClientRates()
 	return data, nil
 }
 

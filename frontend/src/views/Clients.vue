@@ -97,13 +97,24 @@
               <td>
                 <span class="mono" style="font-size: 12.5px; color: var(--text-2);" :title="inbTitle(c)">{{ protoSummary(c) }}</span>
               </td>
-              <td class="pad-y">
+              <td class="usage-td">
                 <div style="min-width: 150px;" :title="usageTitle(c)">
                   <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px; white-space: nowrap; gap: 8px;">
                     <span class="mono" style="font-weight: 600;">{{ HumanReadable.sizeFormat(c.up + c.down) }}</span>
                     <span class="mono" style="color: var(--text-3);">{{ c.volume ? HumanReadable.sizeFormat(c.volume) : '∞' }}</span>
                   </div>
                   <BarMini :value="c.volume ? quotaPct(c) : 4" :color="quotaColor(c)" :height="5" />
+                  <!-- Laid out on every row, filled only while the client moves
+                       traffic: "online" means traffic in the last 10s window, so
+                       a line that came and went with it would resize the row
+                       every time the client paused. -->
+                  <div class="rate mono" :title="rateTip(c)">
+                    <template v-if="rateOf(c)">
+                      <!-- Spaced with a character, not a margin: .rate-fig is ltr,
+                           so its logical margin would land on the outside under RTL. -->
+                      <span class="rate-fig"><span class="rate-dn">↓</span> {{ rateFmt(rateOf(c)!.down) }}</span>&emsp;<span class="rate-fig"><span class="rate-up">↑</span> {{ rateFmt(rateOf(c)!.up) }}</span>
+                    </template>
+                  </div>
                 </div>
               </td>
               <td>
@@ -113,6 +124,9 @@
                   <Chip v-else-if="daysLeft(c.expiry) <= 7" color="amber">{{ $t('ui.dLeft', { n: daysLeft(c.expiry) }) }}</Chip>
                   <Chip v-else><span class="mono">{{ daysLeft(c.expiry) }}</span>&nbsp;{{ $t('ui.daysWord') }}</Chip>
                 </span>
+                <div v-if="hasNextReset(c)" class="reset-line" :title="resetTitle(c)">
+                  <Ico name="refresh" :size="11" />{{ resetLabel(c) }}
+                </div>
               </td>
               <td>
                 <span style="display: inline-flex; gap: 5px; align-items: center;">
@@ -201,6 +215,14 @@
         <div style="padding: 2px 0 4px;">
           <BarMini :value="c.volume ? quotaPct(c) : 4" :color="quotaColor(c)" :height="5" />
         </div>
+        <!-- Always shown, for the same reason the table reserves its line. -->
+        <div class="kv-row">
+          <span class="k">{{ $t('ui.colRate') }}</span>
+          <span v-if="rateOf(c)" class="v mono" :title="rateTip(c)">
+            <span class="rate-fig"><span class="rate-dn">↓</span> {{ rateFmt(rateOf(c)!.down) }}</span>&ensp;<span class="rate-fig"><span class="rate-up">↑</span> {{ rateFmt(rateOf(c)!.up) }}</span>
+          </span>
+          <span v-else class="v" style="color: var(--text-3); font-weight: 400;">—</span>
+        </div>
         <div class="kv-row">
           <span class="k">{{ $t('ui.colExpiry') }}</span>
           <span class="v">
@@ -209,6 +231,12 @@
             <Chip v-else-if="daysLeft(c.expiry) <= 7" color="amber">{{ $t('ui.dLeft', { n: daysLeft(c.expiry) }) }}</Chip>
             <Chip v-else><span class="mono">{{ daysLeft(c.expiry) }}</span>&nbsp;{{ $t('ui.daysWord') }}</Chip>
           </span>
+        </div>
+        <!-- A row of its own: beside the expiry chip, .v's 60% cap clipped the
+             longer locales to an ellipsis. -->
+        <div v-if="hasNextReset(c)" class="kv-row">
+          <span class="k">{{ $t('client.autoReset') }}</span>
+          <span class="v" style="font-weight: 500;" :title="resetTitle(c)">{{ resetLabel(c) }}</span>
         </div>
         <div class="kv-row">
           <span class="k">{{ $t('ui.colStatus') }}</span>
@@ -419,6 +447,27 @@ const usageTitle = (c: any): string =>
   '↓' + HumanReadable.sizeFormat(c.down) + ' - ' + HumanReadable.sizeFormat(c.up) + '↑'
 const expiryTitle = (c: any): string | undefined =>
   c.expiry > 0 ? new Date(c.expiry * 1000).toLocaleString(intlLocale()) : undefined
+// Rates arrive with each stats flush, and only for clients this panel's own
+// core saw move traffic -- so one served by a node alone has none to show.
+const rateOf = (c: any): { up: number, down: number } | undefined => dataStore.clientRates?.[c.name]
+// sizeFormat answers '-' for zero, which reads as "unknown" beside a direction
+// that is moving; an idle direction is a plain 0.
+const rateFmt = (v: number): string =>
+  (v > 0 ? HumanReadable.sizeFormat(v, 1) : '0 ' + t('stats.B')) + '/s'
+// The line clips rather than widen the column, so the figures go here in full.
+const rateTip = (c: any): string | undefined => {
+  const r = rateOf(c)
+  return r ? '↓ ' + rateFmt(r.down) + '  ↑ ' + rateFmt(r.up) + '\n' + t('ui.rateTitle') : undefined
+}
+// Delay start holds nextReset at zero until the first connection, so until then
+// there is no boundary to show.
+const hasNextReset = (c: any): boolean => !!c.autoReset && !c.delayStart && c.nextReset > 0
+const resetLabel = (c: any): string => {
+  const n = daysLeft(c.nextReset)
+  return n >= 1 ? t('ui.resetInDays', { n }) : t('ui.resetSoon')
+}
+const resetTitle = (c: any): string =>
+  t('ui.nextResetAt', { date: new Date(c.nextReset * 1000).toLocaleString(intlLocale()) })
 const inboundsOf = (c: any): any[] =>
   (c.inbounds ?? []).map((id: number) => inbounds.value.find((i: any) => i.id == id)).filter((i: any) => !!i)
 const protoSummary = (c: any): string => {
@@ -549,6 +598,38 @@ const confirmDelete = async () => {
   font-weight: 600;
 }
 td.pad-y { padding-top: 11px; padding-bottom: 11px; }
+/* tighter than pad-y: the reserved rate line has to fit in the height the
+   client cell already gives the row */
+td.usage-td { padding-top: 5px; padding-bottom: 5px; }
+.rate {
+  /* width 0 + min-width 100%: fills the cell but never widens the column as
+     the figures grow */
+  width: 0;
+  min-width: 100%;
+  height: 14px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-3);
+}
+/* Each arrow and figure keeps its own order under RTL: the unit is localised
+   but "/s" is not, and the bidi algorithm otherwise pulls the two apart. */
+.rate-fig { unicode-bidi: isolate; direction: ltr; }
+/* the dashboard's traffic legend colours: download brand, upload emerald */
+.rate-dn { color: var(--brand); }
+.rate-up { color: var(--emerald); }
+.reset-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
 td.actions-td { padding-inline-end: 10px; }
 .on-dot {
   position: absolute;

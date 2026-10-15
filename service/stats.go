@@ -37,6 +37,89 @@ func setOnlines(o onlines) {
 	onlineMu.Unlock()
 }
 
+// ClientRate is one client's throughput over the last stats window, in bytes
+// per second, summed across every inbound it is on -- the same scope as its
+// up/down totals.
+type ClientRate struct {
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+}
+
+// Per-client rates from the last flush, published next to the online lists and
+// guarded by the same lock. Replaced wholesale on every flush and never written
+// in place, so a reader may hand the map out as it is.
+var clientRates = map[string]ClientRate{}
+
+func setClientRates(rates map[string]ClientRate) {
+	onlineMu.Lock()
+	clientRates = rates
+	onlineMu.Unlock()
+}
+
+// When the core's counters were last emptied, which is where the next rate
+// window starts. Both drains move it -- a flush, and carryOverStats just before
+// a stop -- and they run on different goroutines.
+var (
+	drainMu   sync.Mutex
+	lastDrain time.Time
+)
+
+// markDrain records a drain at now and returns the length of the window it
+// closed, or zero when there was no earlier drain to measure from.
+func markDrain(now time.Time) time.Duration {
+	drainMu.Lock()
+	defer drainMu.Unlock()
+	prev := lastDrain
+	lastDrain = now
+	if prev.IsZero() {
+		return 0
+	}
+	return now.Sub(prev)
+}
+
+// minRateWindow floors the window rates are divided by. A flush landing just
+// after carryOverStats drained the core closes a window of a few milliseconds,
+// and dividing its bytes by that would publish a burst nobody sent.
+const minRateWindow = time.Second
+
+// ratesOf turns one drain into per-client rates over the window it covered.
+//
+// It takes the drain alone, never the rows carried over from a failed commit:
+// those are bytes from earlier windows, and counting them again would show a
+// client at twice its speed for one flush after every SQLITE_BUSY. For the same
+// reason the rate is not derived from the clients' up/down: a node's traffic is
+// folded into those a minute at a time, and a traffic reset sends them back to
+// zero. With no window -- the first drain since start, whose counters ran from
+// whenever the core started -- nothing is published rather than a guess.
+func ratesOf(drained []model.Stats, window time.Duration) map[string]ClientRate {
+	rates := map[string]ClientRate{}
+	if window <= 0 {
+		return rates
+	}
+	window = max(window, minRateWindow)
+	bytes := map[string]ClientRate{}
+	for _, stat := range drained {
+		if stat.Resource != "user" {
+			continue
+		}
+		b := bytes[stat.Tag]
+		if stat.Direction {
+			b.Up += stat.Traffic
+		} else {
+			b.Down += stat.Traffic
+		}
+		bytes[stat.Tag] = b
+	}
+	seconds := window.Seconds()
+	for name, b := range bytes {
+		rates[name] = ClientRate{
+			Up:   int64(float64(b.Up) / seconds),
+			Down: int64(float64(b.Down) / seconds),
+		}
+	}
+	return rates
+}
+
 // Per-inbound traffic totals, published on the live payload and written by the
 // flush below, so they race the same way onlineResources does and take the same
 // kind of guard. A plain Mutex, not an RWMutex: a read can seed, so there is no
@@ -200,6 +283,9 @@ func carryOverStats() {
 		return
 	}
 	drained := *box.StatsTracker().GetStats()
+	// The next flush's window starts here: what came before it is in this
+	// drain, not in the next one.
+	markDrain(time.Now())
 	if len(drained) == 0 {
 		return
 	}
@@ -245,6 +331,9 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 			}
 		}
 	}
+	// Marked with the core down too, so the first window after it comes back
+	// is measured from this flush rather than from before the outage.
+	setClientRates(ratesOf(*drained, markDrain(time.Now())))
 
 	// Built locally, then published in one swap at the end — writing the live
 	// struct field by field is what raced with readers.
@@ -483,6 +572,17 @@ func (s *StatsService) GetOnlines() (onlines, error) {
 	onlineMu.RLock()
 	defer onlineMu.RUnlock()
 	return *onlineResources, nil
+}
+
+// GetClientRates reports the throughput of each client that moved traffic in
+// the last stats window. Local core only: a node's clients reach this panel's
+// totals through NodeTrafficJob a minute at a time, which is no basis for a
+// rate, so a client a node serves has only its local share here -- and one
+// served by nodes alone shows online with no rate at all.
+func (s *StatsService) GetClientRates() map[string]ClientRate {
+	onlineMu.RLock()
+	defer onlineMu.RUnlock()
+	return clientRates
 }
 
 const nodeOnlineTTL = 20 * time.Second

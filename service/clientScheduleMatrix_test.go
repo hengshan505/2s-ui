@@ -170,9 +170,12 @@ func checkScheduleKept(t *testing.T, before, after model.Client) {
 	}
 }
 
-// Bulk edits send the client list projection, which carries none of the
-// schedule columns; fillOmitted restores them from the stored row. Same shapes,
-// same assertion.
+// Bulk edits send the client list projection, which carries the reset columns
+// the list shows but not the schedule itself; fillOmitted restores all of them
+// from the stored row. The row below disagrees with the stored one on every
+// reset column it carries -- what a list read before a reset or a first
+// connection sends -- and the stored schedule still has to survive. Same
+// shapes, same assertion.
 func TestEditBulkMatrixKeepsTheSchedule(t *testing.T) {
 	for shapeName, shape := range matrixShapes(time.Now().Unix()) {
 		t.Run(shapeName, func(t *testing.T) {
@@ -191,6 +194,8 @@ func TestEditBulkMatrixKeepsTheSchedule(t *testing.T) {
 				"desc": "bulk", "group": before.Group, "inbounds": before.Inbounds,
 				"up": before.Up, "down": before.Down, "volume": before.Volume,
 				"expiry": before.Expiry, "limitIp": before.LimitIp,
+				"autoReset": !before.AutoReset, "delayStart": !before.DelayStart,
+				"nextReset": before.NextReset + 7*86400,
 			}
 			payload, err := json.Marshal([]interface{}{row})
 			if err != nil {

@@ -60,7 +60,11 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 // config carries every protocol's credentials. This projection feeds the client
 // list, the websocket full payload and every save response, so anything added
 // here is paid on all three. Consumers needing the full row fetch it by id.
-const clientListColumns = "`id`, `enable`, `name`, `desc`, `group`, `remark`, `inbounds`, `up`, `down`, `volume`, `expiry`, `created_at`, `online_at`, `limit_ip`"
+//
+// The three reset columns are there for the list to show when the next reset
+// lands. They are read-only on this shape: the bulk edit submits these rows,
+// and findInboundsChanges restores every reset column from the stored row.
+const clientListColumns = "`id`, `enable`, `name`, `desc`, `group`, `remark`, `inbounds`, `up`, `down`, `volume`, `expiry`, `created_at`, `online_at`, `limit_ip`, `auto_reset`, `delay_start`, `next_reset`"
 
 // GetAllWithConfig adds config for the cluster reconcile diff only: clientDiffers
 // compares it, and an absent key reads as "always different", which would re-push
@@ -331,7 +335,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		// The reset schedule for a selection of clients, in one statement.
 		//
 		// Deliberately not folded into editbulk: that path submits the client
-		// list projection, which cannot carry these columns, so
+		// list projection, which cannot carry the schedule itself, so
 		// findInboundsChanges restores all of them from the stored row -- the
 		// fields this action exists to change are exactly the ones editbulk
 		// cannot. It also writes one row at a time and regenerates links, which
@@ -1610,10 +1614,12 @@ func (s *ClientService) findInboundsChanges(tx *gorm.DB, client *model.Client, f
 		return nil, err
 	}
 	if fillOmitted {
-		// The bulk path submits the client list projection, which cannot carry
-		// these columns; the payload's zero values would silently wipe them —
-		// switching off periodic auto-reset and zeroing next_reset, so
-		// ResetClientsTraffic's "next_reset < now" scan never matches again.
+		// The bulk path submits the client list projection, which does not carry
+		// most of these columns; the payload's zero values would silently wipe
+		// them — switching off periodic auto-reset and zeroing next_reset, so
+		// ResetClientsTraffic's "next_reset < now" scan never matches again. The
+		// reset columns it does carry are only shown: a row the list read before
+		// a reset or a first connection would write the old boundary back.
 		client.Links = oldClient.Links
 		client.Config = oldClient.Config
 		client.AutoReset = oldClient.AutoReset

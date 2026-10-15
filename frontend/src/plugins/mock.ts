@@ -59,6 +59,7 @@ function loadObj() {
     tls: [],
     nodes,
     nodesStatus: nodesStatusObj(),
+    clientRates: Object.fromEntries(onlineUsers.map((n) => [n, { up: Math.floor(rnd(0, 5e5)), down: Math.floor(rnd(0, 5e6)) }])),
     subURI: '',
     enableTraffic: true,
   }
