@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"reflect"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -73,27 +72,6 @@ func track(tr *ConnTracker, user, ip string, createdAt, lastActive int64, t *tes
 	info.lastActive.Store(lastActive)
 	tr.trackConnection(info.ID, info)
 	return info
-}
-
-func TestUserInbounds(t *testing.T) {
-	tr := NewConnTracker()
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "hy2"
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "hy2"
-	track(tr, "alice", "1.1.1.1", 100, 100, t).Inbound = "vless"
-	track(tr, "bob", "2.2.2.2", 100, 100, t).Inbound = "tuic"
-	// Unauthenticated, as on a trojan fallback: nobody's.
-	track(tr, "", "3.3.3.3", 100, 100, t).Inbound = "trojan"
-
-	want := map[string]struct{}{"hy2": {}, "vless": {}}
-	if got := tr.UserInbounds("alice"); !reflect.DeepEqual(got, want) {
-		t.Errorf("UserInbounds(alice) = %v, want %v", got, want)
-	}
-	if got := tr.UserInbounds("carol"); len(got) != 0 {
-		t.Errorf("UserInbounds(carol) = %v, want empty", got)
-	}
-	if got := tr.UserInbounds(""); len(got) != 0 {
-		t.Errorf("UserInbounds(\"\") = %v, want empty", got)
-	}
 }
 
 func TestUserIPs(t *testing.T) {

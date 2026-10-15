@@ -354,34 +354,22 @@ func (c *ConnTracker) Sessions(want func(info *ConnectionInfo) bool) []SessionIn
 	return sessions
 }
 
-// UserInbounds is the set of inbounds user has a routed connection on right
-// now. Only tags are collected, so unlike Sessions it formats nothing.
-func (c *ConnTracker) UserInbounds(user string) map[string]struct{} {
-	inbounds := make(map[string]struct{})
+// CloseConnByUser closes every routed connection of one user, and reports the
+// inbounds they were on. That is all it can do: a multiplex or QUIC session
+// keeps serving new streams after its routed connections are gone, which is
+// what Core.DisconnectUser is for.
+//
+// The inbounds come out of the same pass on purpose. They are the only sign of
+// where the user is connected, and collecting them separately would walk every
+// connection a second time under the lock each connection setup takes.
+func (c *ConnTracker) CloseConnByUser(user string) (closed int, inbounds map[string]struct{}) {
+	inbounds = make(map[string]struct{})
 	if user == "" {
-		return inbounds
-	}
-	c.access.Lock()
-	defer c.access.Unlock()
-	for _, connInfo := range c.connections {
-		if connInfo.User == user && connInfo.Inbound != "" {
-			inbounds[connInfo.Inbound] = struct{}{}
-		}
-	}
-	return inbounds
-}
-
-// CloseConnByUser closes every routed connection of one user. That is all it
-// can do: a multiplex or QUIC session keeps serving new streams after its
-// routed connections are gone, which is what Core.DisconnectUser is for.
-func (c *ConnTracker) CloseConnByUser(user string) int {
-	if user == "" {
-		return 0
+		return 0, inbounds
 	}
 	c.access.Lock()
 	defer c.access.Unlock()
 
-	closedCount := 0
 	for connID, connInfo := range c.connections {
 		if connInfo.User != user {
 			continue
@@ -392,10 +380,13 @@ func (c *ConnTracker) CloseConnByUser(user string) int {
 		if connInfo.PacketConn != nil {
 			connInfo.PacketConn.Close()
 		}
+		if connInfo.Inbound != "" {
+			inbounds[connInfo.Inbound] = struct{}{}
+		}
 		delete(c.connections, connID)
-		closedCount++
+		closed++
 	}
-	return closedCount
+	return closed, inbounds
 }
 
 // UserIPs snapshots the live source IPs of every user want accepts, returning

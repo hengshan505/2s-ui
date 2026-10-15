@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+
 	"github.com/shenaba/2s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -36,25 +38,54 @@ type UnclosableInbound struct {
 	Node string `json:"node,omitempty"`
 }
 
-// DisconnectResult is what disconnecting one user managed to do.
+// DisconnectResult is what disconnecting one user managed to do. Its JSON is
+// DisconnectWire's.
+//
+// There is deliberately no count field. Masters from before the list read only
+// "unclosable", so the wire form still carries one -- derived from the list,
+// so the two cannot disagree. Reading an answer back has nowhere to put it,
+// which is how a count-only answer from such a node is dropped (see
+// service.nodeUnclosable).
 type DisconnectResult struct {
 	// Connections counts the routed connections closed.
 	Connections int `json:"connections"`
 	// Sessions counts the multiplex / anytls sessions cut outright.
 	Sessions int `json:"sessions"`
-	// Unclosable is len(UnclosableInbounds), kept for masters that predate the
-	// list: they read only this count, and warn when it is not zero.
-	Unclosable int `json:"unclosable"`
 	// UnclosableInbounds names the inbounds where the user is likely still
 	// connected by a session this layer cannot reach. Their routed connections
 	// are closed, but the client opens new streams on the session it still has.
 	UnclosableInbounds []UnclosableInbound `json:"unclosableInbounds,omitempty"`
 }
 
+// DisconnectWire is DisconnectResult as it is sent.
+type DisconnectWire struct {
+	Connections int `json:"connections"`
+	Sessions    int `json:"sessions"`
+	// Unclosable is len(UnclosableInbounds), for masters that predate the list:
+	// they read only this count, and warn when it is not zero.
+	Unclosable         int                 `json:"unclosable"`
+	UnclosableInbounds []UnclosableInbound `json:"unclosableInbounds,omitempty"`
+}
+
+// Wire is r with its count filled in. A type that embeds DisconnectResult and
+// adds fields of its own needs it for a MarshalJSON of its own: the one below
+// would otherwise be promoted and marshal the embedded half alone.
+func (r DisconnectResult) Wire() DisconnectWire {
+	return DisconnectWire{
+		Connections:        r.Connections,
+		Sessions:           r.Sessions,
+		Unclosable:         len(r.UnclosableInbounds),
+		UnclosableInbounds: r.UnclosableInbounds,
+	}
+}
+
+func (r DisconnectResult) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.Wire())
+}
+
 // AddUnclosable records one inbound left with a session that could not be cut.
 func (r *DisconnectResult) AddUnclosable(tag string, reason string) {
 	r.UnclosableInbounds = append(r.UnclosableInbounds, UnclosableInbound{Tag: tag, Reason: reason})
-	r.Unclosable++
 }
 
 // unclosableReason says why an inbound of this type can keep a session that a
@@ -76,8 +107,7 @@ func unclosableReason(inboundType string) string {
 
 // userConns is the part of ConnTracker a kick uses.
 type userConns interface {
-	UserInbounds(user string) map[string]struct{}
-	CloseConnByUser(user string) int
+	CloseConnByUser(user string) (closed int, inbounds map[string]struct{})
 }
 
 // DisconnectUser drops every live connection of a user who stays enabled: an
@@ -89,9 +119,9 @@ type userConns interface {
 // meant for looking at one client. UnclosableInbounds says where that limit
 // was hit.
 //
-// live is the set of inbounds the user had routed connections on before the
-// kick, for the caller to look for what only it can recognise among them.
-func (c *Core) DisconnectUser(user string) (result DisconnectResult, live map[string]struct{}, err error) {
+// live maps each inbound the user had routed connections on to its type, for
+// the caller to look for what only it can recognise among them.
+func (c *Core) DisconnectUser(user string) (result DisconnectResult, live map[string]string, err error) {
 	box, err := c.running()
 	if err != nil {
 		return result, nil, err
@@ -111,30 +141,33 @@ func (c *Core) DisconnectUser(user string) (result DisconnectResult, live map[st
 // QUIC session with no stream open at this instant goes unreported. For a kick
 // that is the cheap side: the client may reconnect at once anyway, so the
 // session it keeps buys it nothing it could not get back.
-func disconnect(conns userConns, inbounds []adapter.Inbound, user string) (DisconnectResult, map[string]struct{}) {
+func disconnect(conns userConns, inbounds []adapter.Inbound, user string) (DisconnectResult, map[string]string) {
 	var result DisconnectResult
-	// Read before anything is closed: the routed connections are the only sign
-	// of which inbounds the user is on, and both the kicks below (a cut carrier
-	// takes its streams with it) and CloseConnByUser remove them.
-	live := conns.UserInbounds(user)
+	// Routed connections first, in the one pass that also records which
+	// inbounds they were on. That record is the only sign of where the user is
+	// connected, so nothing may close a connection before it is taken -- and a
+	// cut carrier takes its streams with it. Closing streams ahead of their
+	// carrier costs nothing: the carrier goes a moment later, and whatever the
+	// client opened on it in between goes with it.
+	closed, on := conns.CloseConnByUser(user)
+	result.Connections = closed
 
-	// Sessions first: cutting a carrier ends the streams on it, so fewer of
-	// them are left for the tracker to close one by one.
+	live := make(map[string]string, len(on))
 	for _, inbound := range inbounds {
+		tag := inbound.Tag()
+		_, wasOn := on[tag]
+		if wasOn {
+			live[tag] = inbound.Type()
+		}
 		kicker, ok := inbound.(userKicker)
 		if !ok {
 			continue
 		}
 		r := kicker.KickUser(user)
 		result.Sessions += r.Cut
-		reason := unclosableReason(inbound.Type())
-		if r.Unclosable == 0 || reason == "" {
-			continue
-		}
-		if _, ok := live[inbound.Tag()]; ok {
-			result.AddUnclosable(inbound.Tag(), reason)
+		if reason := unclosableReason(inbound.Type()); r.Unclosable > 0 && reason != "" && wasOn {
+			result.AddUnclosable(tag, reason)
 		}
 	}
-	result.Connections = conns.CloseConnByUser(user)
 	return result, live
 }

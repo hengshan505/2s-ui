@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"reflect"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -99,19 +100,31 @@ func TestSessionsFilter(t *testing.T) {
 
 func TestCloseConnByUser(t *testing.T) {
 	tr := NewConnTracker()
-	alice, _ := routeSession(t, tr, adapter.InboundContext{User: "alice", Source: M.Socksaddr{Addr: mustAddr(t, "1.1.1.1"), Port: 1}})
-	routeSession(t, tr, adapter.InboundContext{User: "bob", Source: M.Socksaddr{Addr: mustAddr(t, "2.2.2.2"), Port: 1}})
+	src := func(ip string) M.Socksaddr { return M.Socksaddr{Addr: mustAddr(t, ip), Port: 1} }
+	alice, _ := routeSession(t, tr, adapter.InboundContext{Inbound: "hy2", User: "alice", Source: src("1.1.1.1")})
+	routeSession(t, tr, adapter.InboundContext{Inbound: "hy2", User: "alice", Source: src("1.1.1.1")})
+	routeSession(t, tr, adapter.InboundContext{Inbound: "vless", User: "alice", Source: src("1.1.1.1")})
+	routeSession(t, tr, adapter.InboundContext{Inbound: "tuic", User: "bob", Source: src("2.2.2.2")})
+	// Unauthenticated, as on a trojan fallback: nobody's.
+	routeSession(t, tr, adapter.InboundContext{Inbound: "trojan", Source: src("3.3.3.3")})
 
-	if n := tr.CloseConnByUser("alice"); n != 1 {
-		t.Errorf("closed %d, want 1", n)
+	n, inbounds := tr.CloseConnByUser("alice")
+	if n != 3 {
+		t.Errorf("closed %d, want 3", n)
+	}
+	if want := map[string]struct{}{"hy2": {}, "vless": {}}; !reflect.DeepEqual(inbounds, want) {
+		t.Errorf("inbounds = %v, want %v", inbounds, want)
 	}
 	if _, err := alice.Read(make([]byte, 1)); err == nil {
 		t.Error("alice's connection is still open")
 	}
-	if left := tr.Sessions(nil); len(left) != 1 || left[0].User != "bob" {
-		t.Errorf("left = %+v, want only bob", left)
+	if left := tr.Sessions(nil); len(left) != 2 {
+		t.Errorf("left = %+v, want bob's and the userless one", left)
 	}
-	if n := tr.CloseConnByUser(""); n != 0 {
+	if n, inbounds := tr.CloseConnByUser(""); n != 0 || len(inbounds) != 0 {
 		t.Error("an empty name matched the userless connections")
+	}
+	if n, inbounds := tr.CloseConnByUser("carol"); n != 0 || len(inbounds) != 0 {
+		t.Errorf("carol: closed %d on %v, want nothing", n, inbounds)
 	}
 }

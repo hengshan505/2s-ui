@@ -2,9 +2,7 @@ package service
 
 import (
 	"encoding/json"
-	"maps"
 	"net/url"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -14,6 +12,8 @@ import (
 	"github.com/shenaba/2s-ui/database/model"
 	"github.com/shenaba/2s-ui/logger"
 	"github.com/shenaba/2s-ui/util/common"
+
+	C "github.com/sagernet/sing-box/constant"
 )
 
 // SessionsResult is a live-connections listing. Errors names the nodes that
@@ -201,10 +201,23 @@ func enabledNodes(ids []uint) ([]*model.Node, error) {
 
 // DisconnectResult adds what went wrong to the merged result: the nodes that
 // could not be told, and this panel's own failure when nodes were asked too.
+//
+// Its JSON is MarshalJSON's, so a field added here has to be added there too.
 type DisconnectResult struct {
 	core.DisconnectResult
-	Errors     map[string]string `json:"errors,omitempty"`
-	LocalError string            `json:"localError,omitempty"`
+	Errors     map[string]string
+	LocalError string
+}
+
+// MarshalJSON is needed for Errors and LocalError to be sent at all: without it
+// the embedded core.DisconnectResult's MarshalJSON is promoted and marshals the
+// core half alone.
+func (r DisconnectResult) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		core.DisconnectWire
+		Errors     map[string]string `json:"errors,omitempty"`
+		LocalError string            `json:"localError,omitempty"`
+	}{r.Wire(), r.Errors, r.LocalError})
 }
 
 // DisconnectLocalUser drops one user's live connections on this panel only.
@@ -227,7 +240,8 @@ func DisconnectLocalUser(user string) (core.DisconnectResult, error) {
 // The inbounds are the ones the core saw the user on just before the kick. That
 // a client may use multiplex is not that it does, so this can over-warn; it
 // cannot see a carrier with no stream open on it either. A routed connection is
-// the only evidence there is.
+// the only evidence there is. Only the Shadowsocks ones among them are looked
+// up, so a client on none costs no query.
 //
 // The report is sorted here rather than by the cluster merge alone, so that it
 // reads the same with no node to merge, and arrives sorted at a master.
@@ -236,7 +250,13 @@ func disconnectLocal(user string) (core.DisconnectResult, error) {
 	if err != nil {
 		return result, err
 	}
-	for _, tag := range muxCarriers(slices.Collect(maps.Keys(live))) {
+	var shadowsocks []string
+	for tag, inboundType := range live {
+		if inboundType == C.TypeShadowsocks {
+			shadowsocks = append(shadowsocks, tag)
+		}
+	}
+	for _, tag := range muxCarriers(shadowsocks) {
 		result.AddUnclosable(tag, core.UnclosableMux)
 	}
 	sortUnclosable(result.UnclosableInbounds)
@@ -251,7 +271,7 @@ func muxCarriers(tags []string) []string {
 	}
 	var inbounds []model.Inbound
 	err := database.GetDB().Model(model.Inbound{}).Select("tag", "options").
-		Where("type = ? AND tag IN ? AND node_id IS NULL", "shadowsocks", tags).
+		Where("type = ? AND tag IN ? AND node_id IS NULL", C.TypeShadowsocks, tags).
 		Order("tag").Find(&inbounds).Error
 	if err != nil {
 		logger.Warning("disconnect: read inbounds: ", err)
@@ -274,11 +294,12 @@ func muxCarriers(tags []string) []string {
 // nodeUnclosable labels the inbounds a node could not cut with the node's name.
 //
 // A node from before per-inbound reports sends a count and no list, and that
-// count is dropped. It comes from the registry's seen set alone -- the signal
-// #234 found too weak for a kick -- so a warning built from it cannot be told
-// from a false one, and a false one asks the operator to disable a client for
-// nothing. Missing a real one costs little: a kick lets the client straight
-// back in anyway. Such a node warns again once it is upgraded.
+// count is dropped -- core.DisconnectResult has no field to decode it into. It
+// comes from the registry's seen set alone, the signal #234 found too weak for
+// a kick, so a warning built from it cannot be told from a false one, and a
+// false one asks the operator to disable a client for nothing. Missing a real
+// one costs little: a kick lets the client straight back in anyway. Such a
+// node warns again once it is upgraded.
 func nodeUnclosable(node string, remote core.DisconnectResult) []core.UnclosableInbound {
 	labelled := make([]core.UnclosableInbound, 0, len(remote.UnclosableInbounds))
 	for _, u := range remote.UnclosableInbounds {
@@ -354,8 +375,5 @@ func DisconnectClusterUser(user string) (DisconnectResult, error) {
 			result.UnclosableInbounds = append(result.UnclosableInbounds, nodeUnclosable(n.Name, remote)...)
 		})
 	sortUnclosable(result.UnclosableInbounds)
-	// Recounted rather than summed: an older node's count is dropped, see
-	// nodeUnclosable.
-	result.Unclosable = len(result.UnclosableInbounds)
 	return result, nil
 }

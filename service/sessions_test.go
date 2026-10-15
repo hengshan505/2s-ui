@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -55,9 +57,8 @@ func TestMuxCarriers(t *testing.T) {
 	}
 }
 
-// A node's inbounds are labelled with the node. One from before per-inbound
-// reports sends only a count, built from the seen set alone (#234); it is
-// dropped rather than shown as a warning nobody could tell from a false one.
+// A node's inbounds are labelled with the node, on a copy. An older node's
+// bare count never reaches here: decoding drops it (TestDisconnectClusterUserMerge).
 func TestNodeUnclosable(t *testing.T) {
 	current := core.DisconnectResult{}
 	current.AddUnclosable("hy2", core.UnclosableQUIC)
@@ -73,11 +74,87 @@ func TestNodeUnclosable(t *testing.T) {
 	if current.UnclosableInbounds[0].Node != "" {
 		t.Error("nodeUnclosable labelled the node's own slice in place")
 	}
-	if got := nodeUnclosable("n1", core.DisconnectResult{Unclosable: 2}); len(got) != 0 {
-		t.Errorf("older node: nodeUnclosable = %+v, want nothing", got)
-	}
 	if got := nodeUnclosable("n1", core.DisconnectResult{Connections: 4}); len(got) != 0 {
 		t.Errorf("nothing left: nodeUnclosable = %+v, want nothing", got)
+	}
+}
+
+// The cluster merge end to end, over HTTP and through the JSON the SPA reads:
+// a node's inbounds come back labelled and sorted, an older node's bare count
+// is dropped, the count is the list's own length, and the node errors survive
+// the custom marshalling next to it.
+func TestDisconnectClusterUserMerge(t *testing.T) {
+	installSessionsDB(t)
+	db := database.GetDB()
+	answers := map[string]string{
+		// Out of tag order, so the merge has something to sort.
+		"zeta": `{"connections":1,"sessions":0,"unclosable":2,"unclosableInbounds":[{"tag":"tuic","reason":"quic"},{"tag":"hy2","reason":"quic"}]}`,
+		// From before per-inbound reports: a count built from the seen set alone.
+		"alpha": `{"connections":2,"sessions":1,"unclosable":3}`,
+	}
+	statuses := map[uint]NodeStatus{}
+	for _, name := range []string{"zeta", "alpha", "down"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/app/apiv2/closeSessions" || r.FormValue("u") != "alice" {
+				t.Errorf("%s: unexpected request %s u=%q", name, r.URL.Path, r.FormValue("u"))
+			}
+			if name == "down" {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.Write([]byte(`{"success":true,"obj":` + answers[name] + `}`))
+		}))
+		t.Cleanup(srv.Close)
+		node := model.Node{Name: name, BaseUrl: srv.URL, WebPath: "/app/", Token: "test-token", Enable: true}
+		if err := db.Create(&node).Error; err != nil {
+			t.Fatalf("seed node %s: %v", name, err)
+		}
+		t.Cleanup(func() { invalidateNodeClient(node.Id) })
+		statuses[node.Id] = NodeStatus{State: "online"}
+	}
+	nodeStatusMu.Lock()
+	saved := nodeStatuses
+	nodeStatuses = statuses
+	nodeStatusMu.Unlock()
+	t.Cleanup(func() {
+		nodeStatusMu.Lock()
+		nodeStatuses = saved
+		nodeStatusMu.Unlock()
+	})
+
+	result, err := DisconnectClusterUser("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Connections        int                      `json:"connections"`
+		Sessions           int                      `json:"sessions"`
+		Unclosable         int                      `json:"unclosable"`
+		UnclosableInbounds []core.UnclosableInbound `json:"unclosableInbounds"`
+		Errors             map[string]string        `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Connections != 3 || got.Sessions != 1 {
+		t.Errorf("connections/sessions = %d/%d, want 3/1 -- an old node's counts still add up", got.Connections, got.Sessions)
+	}
+	want := []core.UnclosableInbound{
+		{Tag: "hy2", Reason: core.UnclosableQUIC, Node: "zeta"},
+		{Tag: "tuic", Reason: core.UnclosableQUIC, Node: "zeta"},
+	}
+	if !reflect.DeepEqual(got.UnclosableInbounds, want) {
+		t.Errorf("unclosableInbounds = %+v, want %+v", got.UnclosableInbounds, want)
+	}
+	if got.Unclosable != 2 {
+		t.Errorf("unclosable = %d, want 2 -- the list's length, with alpha's 3 dropped", got.Unclosable)
+	}
+	if _, ok := got.Errors["down"]; !ok || len(got.Errors) != 1 {
+		t.Errorf("errors = %v, want only down -- lost to the embedded MarshalJSON?", got.Errors)
 	}
 }
 
