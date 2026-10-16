@@ -329,6 +329,8 @@ export default {
     timeLoc: "منطقه زمانی",
     subEncode: "رمزگذاری",
     subInfo: "نمایش اطلاعات کاربر",
+    subCustomHeaders: "هدرهای سفارشی",
+    subCustomHeadersHint: "به هر پاسخ سابسکریپشن اضافه می‌شود، هر خط یک «Name: value»؛ خطوطی که با # شروع شوند نادیده گرفته می‌شوند. هدرهایی که خود پنل تنظیم می‌کند قابل بازنویسی نیستند.",
     path: "مسیر پیشفرض",
     update: "زمان بروزرسانی خودکار",
     subUri: "آدرس نهایی سابسکریپشن",
@@ -731,7 +733,12 @@ export default {
     addr: "آدرس سرور",
     port: "پورت سرور",
     addUrlTest: "افزودن URLTest",
-    delay: "تأخیر"
+    delay: "تأخیر",
+    testUrl: "آدرس تست",
+    testUrlCustom: "آدرس تست دلخواه",
+    testUrlInvalid: "باید یک آدرس http(s) باشد",
+    testUrlHint: "فقط در همین مرورگر ذخیره می‌شود و برای تست تأخیر خروجی‌ها و Endpointها استفاده می‌شود. خاموش یعنی پیش‌فرض sing-box.",
+    testUrlDefault: "آدرس تست پیش‌فرض sing-box",
   },
   rule: {
     add: "ایجاد قانون",

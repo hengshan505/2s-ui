@@ -245,11 +245,11 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 				proxy["ports"] = ports
 			}
 		case "anytls":
+			// sni and skip-cert-verify come from the TLS block below, like
+			// every other protocol's. This branch used to copy them itself,
+			// unconditionally: no insecure set wrote `skip-cert-verify: null`,
+			// and a disabled TLS block still left both on the proxy (#1291).
 			proxy["password"] = obMap["password"]
-			if tls, ok := obMap["tls"].(map[string]interface{}); ok {
-				proxy["sni"] = tls["server_name"]
-				proxy["skip-cert-verify"] = tls["insecure"]
-			}
 		case "shadowsocks":
 			proxy["type"] = "ss"
 			proxy["cipher"] = obMap["method"]
@@ -295,7 +295,10 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 				} else {
 					proxy["packet-encoding"] = "xudp"
 				}
-			case "trojan", "ss", "socks5":
+			case "trojan", "ss", "socks5", "anytls":
+				// anytls carries UDP too, and mihomo keeps it TCP-only
+				// unless the proxy opts in; leaving it out made the switch
+				// look as if it reached only some of the proxies (#1291).
 				proxy["udp"] = true
 			}
 		}

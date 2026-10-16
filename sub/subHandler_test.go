@@ -50,6 +50,7 @@ func TestDashboardHeadersOmitContentDisposition(t *testing.T) {
 
 // The raw subscription keeps it: proxy clients rely on it to name the profile.
 func TestRawSubscriptionKeepsContentDisposition(t *testing.T) {
+	setupSubDB(t) // addHeaders reads subCustomHeaders
 	s := &SubHandler{}
 	w, c := newTestContext()
 

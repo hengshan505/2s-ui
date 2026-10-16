@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shenaba/2s-ui/database"
+	"github.com/shenaba/2s-ui/database/model"
 	"github.com/shenaba/2s-ui/util"
 
 	"github.com/sagernet/sing-box/common/tls"
@@ -202,6 +204,52 @@ func TestClashKeepsGoShapedFieldsOfExternalLinks(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("%s = %#v, want %#v:\n%s", tt.key, got, tt.want, raw)
+			}
+		})
+	}
+}
+
+// anytls was missing from the UDP default, and its own branch copied sni and
+// insecure off the TLS block unconditionally: `skip-cert-verify: null` when
+// insecure was unset, and both keys even with TLS off (#1291).
+func TestClashAnytlsUdpAndTlsFields(t *testing.T) {
+	setupSubDB(t)
+	if err := database.GetDB().Create(&model.Setting{Key: "subClashUdp", Value: "true"}).Error; err != nil {
+		t.Fatalf("seed setting: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		tls      map[string]interface{}
+		wantSni  interface{} // nil = the key must be absent
+		wantSkip interface{}
+	}{
+		{"insecure unset", map[string]interface{}{"enabled": true, "server_name": "a.com"}, "a.com", nil},
+		{"insecure true", map[string]interface{}{"enabled": true, "server_name": "a.com", "insecure": true}, "a.com", true},
+		{"tls off", map[string]interface{}{"enabled": false, "server_name": "a.com", "insecure": true}, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outbounds := []map[string]interface{}{{
+				"type": "anytls", "tag": "at", "server": "a.com",
+				"server_port": float64(443), "password": "pw",
+				"tls": tt.tls,
+			}}
+			raw, err := (&ClashService{}).ConvertToClashMeta(&outbounds, basicClashConfig)
+			if err != nil {
+				t.Fatalf("ConvertToClashMeta: %v", err)
+			}
+			proxy := firstProxy(t, raw)
+			if proxy["udp"] != true {
+				t.Errorf("udp = %#v with subClashUdp on, want true", proxy["udp"])
+			}
+			for key, want := range map[string]interface{}{"sni": tt.wantSni, "skip-cert-verify": tt.wantSkip} {
+				got, present := proxy[key]
+				if want == nil && present {
+					t.Errorf("%s = %#v, want the key omitted", key, got)
+				} else if want != nil && got != want {
+					t.Errorf("%s = %#v, want %#v", key, got, want)
+				}
 			}
 		})
 	}

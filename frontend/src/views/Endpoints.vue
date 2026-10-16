@@ -31,6 +31,7 @@
       >
         <Ico name="chart" :size="15" /> {{ $t('actions.testAll') }}
       </Btn>
+      <UrlTestTarget />
     </div>
 
     <div class="entity-grid">
@@ -89,6 +90,7 @@ import Chip from '@/components/ui/Chip.vue'
 import DeleteConfirm from '@/components/ui/DeleteConfirm.vue'
 import CardBtn from '@/components/ui/CardBtn.vue'
 import EntityCard, { EntityRow } from '@/components/ui/EntityCard.vue'
+import UrlTestTarget from '@/components/UrlTestTarget.vue'
 import EndpointDrawer from '@/layouts/drawers/endpoint/EndpointDrawer.vue'
 import WgQrModal from '@/layouts/drawers/endpoint/WgQrModal.vue'
 import StatsModal from '@/layouts/drawers/StatsModal.vue'

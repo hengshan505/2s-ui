@@ -122,6 +122,11 @@
       <SRow :label="$t('setting.update')" :hint="$t('date.h')">
         <input class="input mono" type="number" min="0" v-model.number="subUpdates" />
       </SRow>
+      <!-- 头名和值都是 ASCII 协议文本,RTL 下也保持从左到右;格式错误由后端 Save 逐行报出 -->
+      <SRow class="sg-span" :label="$t('setting.subCustomHeaders')" :hint="$t('setting.subCustomHeadersHint')">
+        <textarea class="input mono" rows="3" spellcheck="false" dir="ltr" v-model="settings.subCustomHeaders"
+                  :placeholder="'announce: Hello!\nannounce-url: https://t.me/example'"></textarea>
+      </SRow>
     </SettingsGroup>
 
     <!-- ===================== JSON sub ===================== -->
@@ -466,6 +471,7 @@ const settings = ref({
   subClashNoDefGrp: "false",
   subClashSprtAll: "false",
   subClashUdp: "false",
+  subCustomHeaders: "",
   // 通知。凭据(notifyTgToken / notifySmtpPass)后端只写不读:GetAllSetting 把值抹掉,
   // 改成回一个 hasNotifyTgToken / hasNotifySmtpPass 布尔,所以这里两个输入框永远是空的,
   // 留空保存 = 不改动已存的凭据(后端 Save 跳过空值),要换就填新的。

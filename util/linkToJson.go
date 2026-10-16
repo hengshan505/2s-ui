@@ -1,6 +1,7 @@
 package util
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,10 +14,15 @@ import (
 
 func GetOutbound(uri string, i int) (*map[string]interface{}, string, error) {
 	u, err := url.Parse(uri)
+	if isShadowsocksLink(uri) && (err != nil || u.User == nil) {
+		if rebuilt, ok := rebuildShadowsocksLink(uri); ok {
+			u, err = rebuilt, nil
+		}
+	}
 	if err == nil {
 		switch u.Scheme {
 		case "vmess":
-			return vmess(u.Host, i)
+			return vmess(vmessPayload(uri), i)
 		case "vless":
 			return vless(u, i)
 		case "trojan":
@@ -130,6 +136,21 @@ func httpProxy(u *url.URL, i int) (*map[string]interface{}, string, error) {
 	}
 	proxyCredentials(http, u)
 	return &http, tag, nil
+}
+
+// vmessPayload is everything after "vmess://", not u.Host: the standard
+// alphabet has '/', which url.Parse takes for the start of a path, so a payload
+// carrying one was cut short and failed to decode. A non-ASCII remark is enough
+// to put one there, and the links this panel generates are standard base64 --
+// so a node replica's vmess link could vanish from the JSON and Clash
+// subscriptions. No base64 alphabet has '?' or '#', so a query or a remark some
+// clients append still ends the payload, as it did before.
+func vmessPayload(uri string) string {
+	_, payload, _ := strings.Cut(uri, "://")
+	if end := strings.IndexAny(payload, "?#"); end != -1 {
+		payload = payload[:end]
+	}
+	return payload
 }
 
 func vmess(data string, i int) (*map[string]interface{}, string, error) {
@@ -470,6 +491,76 @@ func tuic(u *url.URL, i int) (*map[string]interface{}, string, error) {
 		"tls":                getTls(security, &query),
 	}
 	return &tuic, tag, nil
+}
+
+func isShadowsocksLink(uri string) bool {
+	scheme, _, ok := strings.Cut(uri, "://")
+	return ok && (strings.EqualFold(scheme, "ss") || strings.EqualFold(scheme, "shadowsocks"))
+}
+
+// rebuildShadowsocksLink rewrites the ss links url.Parse cannot find a
+// userinfo in as a SIP002 link with a base64url userinfo, which it reads whole.
+// Each of these was dropped from every subscription that parses links (#1281):
+//
+//   - the legacy form, ss://BASE64(method:password@host:port), which has no
+//     userinfo to find -- providers still serve it;
+//   - a userinfo in standard base64 with a '/' in it: url.Parse ends the
+//     authority there, so the '@' lands in the path;
+//   - a plain-text 2022 userinfo whose base64 key has a '/', which SIP002 says
+//     to percent-encode and some generators do not.
+//
+// Only reached when the plain parse failed or found no userinfo, so a link that
+// already parses is never touched.
+func rebuildShadowsocksLink(uri string) (*url.URL, bool) {
+	scheme, rest, _ := strings.Cut(uri, "://")
+	rest, fragment, hasFragment := strings.Cut(rest, "#")
+
+	var userInfo, hostAndRest string
+	if at := strings.Index(rest, "@"); at != -1 {
+		// A base64 userinfo has no '@', so the first one ends it.
+		encoded := rest[:at]
+		hostAndRest = rest[at+1:]
+		if decoded, err := decodeAnyBase64(encoded); err == nil {
+			userInfo = string(decoded)
+		} else if plain, err := url.PathUnescape(encoded); err == nil {
+			userInfo = plain
+		} else {
+			return nil, false
+		}
+	} else {
+		// Legacy: the whole body is one blob, possibly followed by a plugin
+		// query. A trailing '/' may be the separator before that query or the
+		// blob's own last character, so both readings are tried.
+		body, query, hasQuery := strings.Cut(rest, "?")
+		decoded, err := decodeAnyBase64(body)
+		if err != nil {
+			if decoded, err = decodeAnyBase64(strings.TrimSuffix(body, "/")); err != nil {
+				return nil, false
+			}
+		}
+		// The last '@': a password may hold one, a host:port cannot.
+		at := strings.LastIndex(string(decoded), "@")
+		if at == -1 {
+			return nil, false
+		}
+		userInfo, hostAndRest = string(decoded[:at]), string(decoded[at+1:])
+		if hasQuery {
+			hostAndRest += "/?" + query
+		}
+	}
+	if method, _, ok := strings.Cut(userInfo, ":"); !ok || method == "" {
+		return nil, false
+	}
+
+	rebuilt := scheme + "://" + base64.RawURLEncoding.EncodeToString([]byte(userInfo)) + "@" + hostAndRest
+	if hasFragment {
+		rebuilt += "#" + fragment
+	}
+	u, err := url.Parse(rebuilt)
+	if err != nil || u.User == nil {
+		return nil, false
+	}
+	return u, true
 }
 
 func ss(u *url.URL, i int) (*map[string]interface{}, string, error) {

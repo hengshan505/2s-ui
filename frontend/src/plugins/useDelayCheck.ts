@@ -1,7 +1,46 @@
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HttpUtils from '@/plugins/httputil'
 import { EntityRow } from '@/components/ui/EntityCard.vue'
+
+// The URL the delay test fetches through each outbound. Off by default, which
+// leaves it to sing-box (gstatic's generate_204). Kept per browser rather than
+// as a panel setting: it is a diagnostic choice for whoever is looking, and the
+// scheduled outbound probe has its own (notifyOutboundUrl). Module-level, so
+// the Outbounds and Endpoints pages share one choice.
+const TEST_URL_ON_KEY = '2sui-urltest-on'
+const TEST_URL_KEY = '2sui-urltest-url'
+
+const readStored = (key: string): string | null => {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+const writeStored = (key: string, value: string) => {
+  try { localStorage.setItem(key, value) } catch { /* private mode */ }
+}
+
+const testUrlEnabled = ref(readStored(TEST_URL_ON_KEY) === 'true')
+const testUrl = ref(readStored(TEST_URL_KEY) ?? '')
+watch(testUrlEnabled, (v) => writeStored(TEST_URL_ON_KEY, v ? 'true' : 'false'))
+watch(testUrl, (v) => writeStored(TEST_URL_KEY, v))
+
+export const isValidTestUrl = (s: string): boolean => {
+  try {
+    const u = new URL(s)
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host !== ''
+  } catch {
+    return false
+  }
+}
+
+// What a test sends as `link`, or undefined for sing-box's default. An invalid
+// URL is not sent: the field shows why, rather than every test failing with an
+// error that does not point at it.
+const testLink = computed((): string | undefined =>
+  testUrlEnabled.value && isValidTestUrl(testUrl.value) ? testUrl.value : undefined)
+
+export function useTestUrl() {
+  return { testUrlEnabled, testUrl, testLink }
+}
 
 interface CheckResult {
   loading?: boolean
@@ -28,7 +67,7 @@ export function useDelayCheck(list: () => any[]) {
 
   const check = async (tag: string) => {
     checkResults.value = { ...checkResults.value, [tag]: { loading: true, success: false } }
-    const msg = await HttpUtils.get('api/checkOutbound', { tag })
+    const msg = await HttpUtils.get('api/checkOutbound', { tag, link: testLink.value })
     const success = msg.success && msg.obj?.OK
     const errorMessage = success ? undefined : (msg.obj?.Error ?? msg.msg ?? '')
     checkResults.value = {

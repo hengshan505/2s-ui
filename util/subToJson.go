@@ -63,8 +63,15 @@ func GetExternalLink(url string) string {
 		return ""
 	}
 
-	data := StrOrBase64Encoded(string(body))
-	return data
+	// Any base64 form: providers serve unpadded and URL-safe bodies as well,
+	// and standard-only decoding handed those on as one line of base64, from
+	// which no link could be read (#1281). Trimmed first, since the decoders
+	// skip line breaks but not other whitespace; a body that is not base64 is
+	// returned as it came.
+	if decoded, err := decodeAnyBase64(strings.TrimSpace(string(body))); err == nil {
+		return string(decoded)
+	}
+	return string(body)
 }
 
 func GetExternalSub(url string) ([]map[string]interface{}, error) {
@@ -75,7 +82,9 @@ func GetExternalSub(url string) ([]map[string]interface{}, error) {
 		return nil, common.NewError("no url")
 	}
 
-	data := GetExternalLink(url)
+	// Trimmed: a JSON body ending in a newline failed the brace check below and
+	// was read as a list of links.
+	data := strings.TrimSpace(GetExternalLink(url))
 	if len(data) == 0 {
 		return nil, common.NewError("no result")
 	}
@@ -115,6 +124,12 @@ func GetExternalSub(url string) ([]map[string]interface{}, error) {
 		// if data is a text
 		links := strings.Split(data, "\n")
 		for _, link := range links {
+			// A CRLF body left a '\r' on every line, and url.Parse refuses a
+			// control character, so not one link in it was read.
+			link = strings.TrimSpace(link)
+			if link == "" {
+				continue
+			}
 			linkToJson, _, err := GetOutbound(link, 0)
 			if err == nil {
 				result = append(result, *linkToJson)

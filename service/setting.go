@@ -115,6 +115,7 @@ var defaultValueMap = map[string]string{
 	"subClashNoDefGrp":   "false",
 	"subClashSprtAll":    "false",
 	"subClashUdp":        "false",
+	"subCustomHeaders":   "",
 	"globalReset":        "",
 	"globalResetLast":    "0",
 	"globalResetArmed":   "",
@@ -829,6 +830,11 @@ func (s *SettingService) Save(tx *gorm.DB, data json.RawMessage) error {
 		}
 		if key == "webTrustedProxies" {
 			if _, err = parseTrustedProxies(obj); err != nil {
+				return err
+			}
+		}
+		if key == "subCustomHeaders" {
+			if _, err = ParseSubCustomHeaders(obj); err != nil {
 				return err
 			}
 		}

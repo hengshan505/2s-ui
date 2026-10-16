@@ -46,6 +46,11 @@ func (s *LinkService) GetLinkList(linkJson *json.RawMessage, types string, clien
 		case "sub":
 			subLinks := util.GetExternalLink(link.Uri)
 			for _, uri := range strings.Split(subLinks, "\n") {
+				// The same lines GetExternalSub reads: a CRLF body's '\r' and
+				// its blank lines are not links.
+				if uri = strings.TrimSpace(uri); uri == "" {
+					continue
+				}
 				result = append(result, Link{Type: link.Type, Remark: link.Remark, Uri: uri})
 			}
 		case "local":

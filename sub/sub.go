@@ -17,6 +17,7 @@ import (
 	"github.com/shenaba/2s-ui/service"
 	"github.com/shenaba/2s-ui/util/common"
 
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 )
 
@@ -47,6 +48,11 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 
 	engine := gin.Default()
+	// The same middleware the panel uses. Clients that send Accept-Encoding:
+	// gzip -- sing-box, mihomo and the browser on the dashboard all do -- get a
+	// subscription several times smaller, which counts on a mobile link; the
+	// rest get it as before.
+	engine.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	subPath, err := s.SettingService.GetSubPath()
 	if err != nil {

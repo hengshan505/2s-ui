@@ -174,9 +174,19 @@ func (s *SubHandler) subHeaders(c *gin.Context) {
 	c.Status(200)
 }
 
-// addHeaders is the raw-subscription set: the profile headers plus the
-// Content-Disposition that makes a proxy client save the payload to a file.
+// addHeaders is the raw-subscription set: the operator's custom headers, the
+// profile headers, and the Content-Disposition that makes a proxy client save
+// the payload to a file. The custom ones go first and the panel's own after,
+// though Save already refuses a custom line naming one of those. Not on the
+// dashboard page: these are meant for proxy clients, which never load it.
 func (s *SubHandler) addHeaders(c *gin.Context, headers []string) {
+	if custom, err := s.SettingService.GetSubCustomHeaders(); err != nil {
+		logger.Warning("sub: error reading subCustomHeaders:", err)
+	} else {
+		for _, h := range custom {
+			c.Writer.Header().Set(h.Name, h.Value)
+		}
+	}
 	s.addProfileHeaders(c, headers)
 	c.Writer.Header().Set("Content-Disposition", contentDispositionHeader(headers[2]))
 }
