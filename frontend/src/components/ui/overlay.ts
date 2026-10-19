@@ -70,8 +70,13 @@ const FOCUSABLE =
 export const trapFocus = (container: HTMLElement): (() => void) => {
   const prev = document.activeElement as HTMLElement | null
 
-  // focus the panel itself, not its first control, to avoid a stray focus ring
+  // focus the panel itself, not its first control, to avoid a stray focus ring.
+  // The panel can still get one: Chrome matches :focus-visible on script focus
+  // unless the last focus came from a mouse click, so whether the UA outline
+  // was drawn around the whole dialog depended on what was clicked before
+  // (#248). It is only a focus anchor; Tab moves on to controls with their own.
   container.tabIndex = -1
+  container.style.outline = 'none'
   container.focus({ preventScroll: true })
 
   const focusables = () =>
