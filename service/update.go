@@ -128,8 +128,9 @@ func startCoreAfterFailedExec() {
 	if corePtr == nil {
 		return
 	}
-	coreRetired.Store(false)
-	if err := (&ConfigService{}).StartCore(); err != nil {
+	s := &ConfigService{}
+	s.ReclaimCore()
+	if err := s.StartCore(); err != nil {
 		logger.Error("restore core after failed in-place restart: ", err)
 	}
 }

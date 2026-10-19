@@ -52,8 +52,9 @@ var (
 	// queuedRestarts counts the ones that ran; see requestRestart.
 	restartQueued  atomic.Bool
 	queuedRestarts atomic.Int64
-	// coreRetired is set once the process is done with this core; see
-	// RetireCore.
+	// coreRetired is set while the panel is not holding the core: from
+	// app.Stop until app.Start takes it back, and across the exec of an
+	// in-place update. See RetireCore and ReclaimCore.
 	coreRetired       atomic.Bool
 	lastStartFailTime time.Time
 	startCooldown     = 15 * time.Second
@@ -98,9 +99,6 @@ type SingBoxConfig struct {
 
 func NewConfigService(c *core.Core) *ConfigService {
 	corePtr = c
-	// A new core is not retired, whatever the one before it was: this is how
-	// a SIGHUP's re-Init comes back after app.Stop retired the old one.
-	coreRetired.Store(false)
 	// The gate is read per connection rather than captured by each tracker, so
 	// installing it here does not have to be ordered against the first StartCore.
 	core.SetConnGate(ipLimits.allow)
@@ -304,6 +302,12 @@ func (s *ConfigService) RestartCore() error {
 	}
 	startMu.Lock()
 	defer startMu.Unlock()
+	// Same reason, and under the lock because that is where RetireCore's stop
+	// is ordered: startLocked refuses a retired core by returning nil, which
+	// here turned a restart that started nothing into a success (#251).
+	if coreRetired.Load() {
+		return common.NewError("the panel is restarting or shutting down: the core comes back with it")
+	}
 	if err := stopLocked(); err != nil {
 		logger.Warning("restart sing-box (stop): ", err)
 	}
@@ -403,20 +407,36 @@ func startBox(rawConfig []byte) (up bool, err error) {
 	return true, nil
 }
 
-// RetireCore stops the core for good: for app.Stop, and for the exec of an
-// in-place update. Nothing starts it again until NewConfigService installs a
-// new one or startCoreAfterFailedExec takes it back.
+// RetireCore stops the core and keeps it down until ReclaimCore: for app.Stop,
+// and for the exec of an in-place update.
 //
 // StopCore alone was not enough. A restart queued by a save just before
-// (requestRestart), or the watchdog, could take startMu after the stop and
-// start the core again: on a SIGHUP that was the old Core, started after
-// Init had already replaced corePtr, so it ran on unowned with every inbound
-// port held and every later start failing on them; before an exec it carried
-// the core's auto-route rules into the new process, which is what stopping
-// it first is for.
+// (requestRestart), or a watchdog tick already under way -- cron.Stop does not
+// wait for one -- could take startMu after the stop and start the core again.
+// On a shutdown that left it running into the process exit, and before an
+// exec it carried the core's auto-route rules into the new process, which is
+// what stopping it first is for: those rules are not tied to a descriptor, so
+// neither the exit nor the exec reclaims them.
 func (s *ConfigService) RetireCore() error {
 	coreRetired.Store(true)
 	return s.StopCore()
+}
+
+// ReclaimCore undoes RetireCore: from here on the core may be started again.
+// It starts nothing itself: under maintenance the core has to stay down -- and
+// that is also why it cannot wait for app.Start's own StartCore, since
+// switching maintenance off later goes through StartCore, which starts nothing
+// while the core is retired.
+//
+// app.Start calls it first, before anything that can fail or start the core,
+// because a SIGHUP restarts the panel as app.Stop then app.Start on the same
+// Core: Init, and with it NewConfigService, never runs again. In 1.9.1 nothing
+// else took it back (#251), so every panel restart -- api/restartApp, which
+// the settings page calls after any save that needs it, the restart button,
+// a database import -- left the core down for the life of the process, with
+// the watchdog logging every five seconds that it would not start it.
+func (s *ConfigService) ReclaimCore() {
+	coreRetired.Store(false)
 }
 
 func (s *ConfigService) StopCore() error {

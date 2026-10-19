@@ -723,11 +723,11 @@ func TestAnInboundEditRefusedByThePanelLeavesTheCoreAlone(t *testing.T) {
 }
 
 // Once the panel is done with the core -- app.Stop, the exec of an in-place
-// update -- nothing starts it again: not a restart a save queued just before,
-// not the watchdog, not the restart button. A failed exec takes it back.
+// update -- nothing starts it again until it is taken back: not a restart a
+// save queued just before, not the watchdog, not the restart button. A failed
+// exec takes it back.
 func TestARetiredCoreStaysDown(t *testing.T) {
 	s := runningPanel(t)
-	t.Cleanup(func() { coreRetired.Store(false) })
 	if err := s.RetireCore(); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
@@ -735,7 +735,10 @@ func TestARetiredCoreStaysDown(t *testing.T) {
 	_ = s.restartQueuedCore() // what requestRestart runs
 	_ = s.TryStartCore()      // the watchdog
 	_ = s.StartCore()
-	_ = s.RestartCore()
+	// The button has to say so: a nil here read as a restart that worked.
+	if err := s.RestartCore(); err == nil {
+		t.Error("restarting a retired core reported success")
+	}
 	if corePtr.IsRunning() {
 		t.Fatal("a retired core was started again")
 	}
@@ -743,5 +746,43 @@ func TestARetiredCoreStaysDown(t *testing.T) {
 	startCoreAfterFailedExec()
 	if !corePtr.IsRunning() {
 		t.Fatal("a failed exec must take the core back")
+	}
+}
+
+// A SIGHUP restarts the panel as app.Stop then app.Start on the same core --
+// Init does not run again -- so Start has to take back what Stop retired, or
+// the core stays down for good while the watchdog says every five seconds that
+// it will not start it (#251). Under maintenance as well: there the start is
+// switching maintenance off, later, after Start has long returned.
+func TestARestartedPanelTakesTheCoreBack(t *testing.T) {
+	s := runningPanel(t)
+
+	// app.Stop, then app.Start, then the watchdog's next tick.
+	if err := s.RetireCore(); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	s.ReclaimCore()
+	if err := s.TryStartCore(); err != nil {
+		t.Fatalf("watchdog start: %v", err)
+	}
+	if !corePtr.IsRunning() {
+		t.Fatal("the watchdog did not start a core the panel took back")
+	}
+	if err := s.RestartCore(); err != nil || !corePtr.IsRunning() {
+		t.Fatalf("restart after the panel took the core back = %v, running %v", err, corePtr.IsRunning())
+	}
+
+	if err := s.SetMaintenance(true); err != nil {
+		t.Fatalf("maintenance on: %v", err)
+	}
+	if err := s.RetireCore(); err != nil {
+		t.Fatalf("retire under maintenance: %v", err)
+	}
+	s.ReclaimCore()
+	if err := s.SetMaintenance(false); err != nil {
+		t.Fatalf("maintenance off: %v", err)
+	}
+	if !corePtr.IsRunning() {
+		t.Fatal("switching maintenance off after a panel restart did not start the core")
 	}
 }

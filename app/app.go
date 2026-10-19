@@ -74,6 +74,13 @@ func (a *APP) Init() error {
 }
 
 func (a *APP) Start() error {
+	// Take back the core Stop retired: on a SIGHUP this runs on the same core
+	// right after Stop, and Init does not run again. First, so neither an
+	// early return below nor maintenance mode can leave it retired: a retired
+	// core stays down for the life of the process, the watchdog included
+	// (#251).
+	a.configService.ReclaimCore()
+
 	loc, err := a.SettingService.GetTimeLocation()
 	if err != nil {
 		return err

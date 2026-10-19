@@ -37,6 +37,9 @@ func maintenanceEnv(t *testing.T) *ConfigService {
 		}
 		corePtr = previous
 		maintenanceMode.Store(false)
+		// Only app.Start takes a retired core back, and no test here runs
+		// it: left set, it would keep every later test's core down.
+		coreRetired.Store(false)
 		if err := database.CloseDBForTest(); err != nil {
 			t.Errorf("close db: %v", err)
 		}
