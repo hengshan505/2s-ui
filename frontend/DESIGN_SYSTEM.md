@@ -88,7 +88,7 @@ src/
 | `Check` | `checked?` | `toggle` | — | 复选方块（**非 v-model**,便于行内 `@click.stop`）;Tab 可聚焦,Space/Enter 合成真实 click(与鼠标同事件路径,包在 `<label @click>` 里不会双触发) |
 | `CheckLabel` | `modelValue` `label` | `update:modelValue` | — | 复选 + 文字 |
 | `SwitchLabel` | `modelValue` `label` | `update:modelValue` | — | 行内开关 + 文字 |
-| `Segmented` | `modelValue` `options:[value,label][]` `block?` | `update:modelValue` | — | 分段选择;`block` = 抽屉内满宽 |
+| `Segmented` | `modelValue` `options:[value,label][]` `block?` | `update:modelValue` | — | 分段选择;`block` = 抽屉内满宽。放不下时横向滚动(滚动条隐藏):被遮住的一侧边缘渐隐并叠一个箭头按钮(点击翻一页),鼠标滚轮可横滚,选中项自动滚入可视区 |
 | `KeyInput` | `modelValue?` `placeholder?` `secret?` `title?` | `update:modelValue` `regenerate` | — | 密钥框 + 重新生成按钮（密码/UUID） |
 | `DateTimeInput` | `modelValue`(**epoch 秒**,0=未填) `emptyLabel?`(未填时显示的文案,默认「无限」) | `update:modelValue` | — | 到期时间、下次重置;0 的含义随字段而定,不是「无限期」的字段要传 `emptyLabel`;`fa` locale 自动用波斯历 |
 | `ChipSelect` | `modelValue:string[]` `options:{title,value}[]` `label?` `placeholder?` | `update:modelValue` | — | 下拉多选,选中以 chip 展示;面板 Teleport 到 body(弹窗内不被 `overflow` 裁切),视口不足自动向上翻转,chips 换行时自动跟随锚点。键盘 combobox 模式:焦点始终留在锚点,↑↓ 移高亮、Enter/Space 切换选中(面板不关)、Esc 关闭 |

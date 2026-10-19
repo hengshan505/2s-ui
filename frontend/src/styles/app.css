@@ -139,21 +139,52 @@
 
 /* ---------------- Segmented control ---------------- */
 .segmented {
-  display: flex; gap: 2px;
-  background: var(--surface-3); padding: 3px;
+  position: relative;
+  background: var(--surface-3);
   border-radius: 9px; border: 1px solid var(--line);
-  max-width: 100%; overflow-x: auto;
+  max-width: 100%; min-width: 0;
 }
-.segmented button {
+/* the scroller, inside the pill so the fade leaves its background alone; the
+   padding stays on it so the active button's shadow is not clipped */
+.seg-track { display: flex; gap: 2px; padding: 3px; overflow-x: auto; }
+/* options past an edge fade out under that edge's arrow (Segmented.vue sets
+   these from the scroll position): clear beneath the arrow, then a 24px ramp.
+   A mask reads only alpha, so the black is not a colour. */
+.seg-track.fade-l {
+  -webkit-mask-image: linear-gradient(to right, transparent 28px, #000 52px);
+  mask-image: linear-gradient(to right, transparent 28px, #000 52px);
+}
+.seg-track.fade-r {
+  -webkit-mask-image: linear-gradient(to left, transparent 28px, #000 52px);
+  mask-image: linear-gradient(to left, transparent 28px, #000 52px);
+}
+.seg-track.fade-l.fade-r {
+  -webkit-mask-image: linear-gradient(to right, transparent 28px, #000 52px, #000 calc(100% - 52px), transparent calc(100% - 28px));
+  mask-image: linear-gradient(to right, transparent 28px, #000 52px, #000 calc(100% - 52px), transparent calc(100% - 28px));
+}
+.seg-track button {
   border: none; cursor: pointer;
   font-family: var(--font-ui); font-size: 12.5px; font-weight: 600;
   padding: 5px 11px; border-radius: 7px;
   background: transparent; color: var(--text-3);
   white-space: nowrap; transition: all .15s var(--ease);
 }
-.segmented button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
-.segmented.block { border: none; margin-bottom: 18px; gap: 4px; }
-.segmented.block button { flex: 1; padding: 8px; font-size: 13px; }
+.seg-track button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
+/* overlaid on the faded strip rather than laid out beside the track, so one
+   appearing never reflows the options */
+.seg-arrow {
+  position: absolute; top: 3px; bottom: 3px; width: 24px;
+  display: grid; place-items: center;
+  border: none; padding: 0; border-radius: 7px; cursor: pointer;
+  background: transparent; color: var(--text-2);
+  transition: color .15s var(--ease), background .15s var(--ease);
+}
+.seg-arrow:hover { background: var(--surface); color: var(--text); }
+.seg-arrow.l { left: 3px; }
+.seg-arrow.r { right: 3px; }
+.segmented.block { border: none; margin-bottom: 18px; }
+.segmented.block .seg-track { gap: 4px; }
+.segmented.block .seg-track button { flex: 1; padding: 8px; font-size: 13px; }
 
 /* ---------------- Tabs (underline) ---------------- */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
