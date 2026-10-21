@@ -8,7 +8,7 @@
           <Btn variant="subtle" sm @click="toggle">{{ $t('dial.options') }}</Btn>
         </template>
         <div style="display: flex; flex-direction: column; gap: 2px; padding: 4px;">
-          <div v-if="mode != 'client'" class="pop-item"><SwitchLabel v-model="optionDetour" :label="$t('listen.detour')" /></div>
+          <div v-if="mode != 'client' || detourTags?.length || dial.detour != undefined" class="pop-item"><SwitchLabel v-model="optionDetour" :label="$t('listen.detour')" /></div>
           <div v-if="mode != 'client'" class="pop-item"><SwitchLabel v-model="optionBind" :label="$t('dial.bindIf')" /></div>
           <div v-if="mode != 'client'" class="pop-item"><SwitchLabel v-model="optionIPV4" :label="$t('dial.bindIp4')" /></div>
           <div v-if="mode != 'client'" class="pop-item"><SwitchLabel v-model="optionIPV6" :label="$t('dial.bindIp6')" /></div>
@@ -27,7 +27,7 @@
     <div class="grid2">
       <Field v-if="optionDetour" :label="$t('dial.detourText')">
         <Select v-model="dial.detour">
-          <option v-for="tag in outTags" :key="tag" :value="tag">{{ tag }}</option>
+          <option v-for="tag in detourOptions" :key="tag" :value="tag">{{ tag }}</option>
         </Select>
       </Field>
       <Field v-if="optionBind" :label="$t('dial.bindIf')">
@@ -92,11 +92,23 @@ import { optionField, valueField } from '@/plugins/formField'
 
 // mode="client" hides the toggles that only make sense server-side; the fields
 // themselves still render if the entity already carries those keys.
-const props = defineProps<{ dial: any; mode?: string }>()
+//
+// detourTags replaces the outbounds as what a detour may name. A client config
+// is not dialled from this panel's core, so its outbounds mean nothing there:
+// the inbound drawer passes the inbounds whose client configs it can ride,
+// and the subscription rewrites the tag to theirs (#255). In client mode the
+// detour toggle shows only when there is one to pick, or one to take back.
+const props = defineProps<{ dial: any; mode?: string; detourTags?: string[] }>()
 
 const d = () => props.dial
 
-const outTags = computed(() => Data().outboundTags)
+const outTags = computed(() => props.detourTags ?? Data().outboundTags)
+// A detour whose target was deleted or renamed stays listed, so the field
+// shows what is stored rather than a blank that reads as unset.
+const detourOptions = computed((): string[] => {
+  const current = props.dial.detour
+  return current && !outTags.value.includes(current) ? [current, ...outTags.value] : outTags.value
+})
 const dnsTags = computed(() => Data().config.dns?.servers?.map((d: any) => d.tag) ?? [])
 
 const connectTimeout = computed({

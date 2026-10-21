@@ -72,7 +72,7 @@
       <template v-else>
         <OutJson :in-data="inbound" :type="inbound.type" />
         <Multiplex v-if="Object.hasOwn(inbound, 'multiplex')" direction="out" :data="inbound.out_json" />
-        <Dial v-if="inbound.out_json" :dial="inbound.out_json" mode="client" />
+        <Dial v-if="inbound.out_json" :dial="inbound.out_json" mode="client" :detour-tags="detourTags" />
         <hr class="form-divider" />
         <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
           <SectionLabel style="flex: 1;">{{ $t('in.multiDomain') }}</SectionLabel>
@@ -245,6 +245,19 @@ const subTitle = computed(() => {
 const clients = computed((): any[] => Data().clients ?? [])
 
 const addrsList = computed((): any[] => inbound.value.addrs ?? [])
+
+// What this client config can dial through: the ShadowTLS listeners, whose
+// client half carries no proxy of its own and is only ever ridden (#255).
+// Only v3 ones -- before v3 there is no client config to ride, and the save
+// refuses it. Replicas are left out: they reach a subscription as links, never
+// as an outbound a detour could name.
+const detourTags = computed((): string[] => {
+  if (inbound.value.type == InTypes.ShadowTLS) return []
+  return (Data().inbounds ?? [])
+    .filter((i: any) => i.type == InTypes.ShadowTLS && (i.version ?? 0) >= 3 &&
+      i.node_id == null && i.tag != inbound.value.tag)
+    .map((i: any) => i.tag)
+})
 
 const hasUser = computed((): boolean => {
   if (props.id > 0) return false

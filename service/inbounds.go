@@ -76,6 +76,8 @@ func (s *InboundService) GetAll() (*[]map[string]interface{}, error) {
 			inbData["listen_port"] = restFields["listen_port"]
 			if inbound.Type == "shadowtls" {
 				json.Unmarshal(restFields["version"], &shadowtls_version)
+				// Only v3 has a client config, so only v3 is offered to ride (#255).
+				inbData["version"] = shadowtls_version
 			}
 			if inbound.Type == "shadowsocks" {
 				json.Unmarshal(restFields["managed"], &ss_managed)
@@ -159,6 +161,24 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			if err != nil {
 				return err
 			}
+			ridersKnowItAs := inbound.Tag
+			if act == "edit" {
+				ridersKnowItAs = oldTag
+			}
+			err = checkClientDetour(tx, &inbound, ridersKnowItAs)
+			if err != nil {
+				return err
+			}
+			// Its riders follow a rename. Only rows, so it goes before the
+			// core is touched: failing after it would leave the core renamed
+			// under a save that rolled back. After checkClientDetour, which
+			// still has to find them by the old tag.
+			if act == "edit" && oldTag != "" && oldTag != inbound.Tag {
+				err = renameClientDetours(tx, inbound.Id, oldTag, inbound.Tag)
+				if err != nil {
+					return err
+				}
+			}
 		}
 
 		if inbound.NodeId == nil && corePtr.IsRunning() {
@@ -213,6 +233,16 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 		err = tx.Model(model.Inbound{}).Select("id", "node_id").Where("tag = ?", tag).Scan(&old).Error
 		if err != nil {
 			return err
+		}
+		if old.NodeId == nil {
+			riders, err := clientDetourRiders(tx, old.Id, tag)
+			if err != nil {
+				return err
+			}
+			if len(riders) > 0 {
+				return common.NewErrorf("inbound %s is the detour of the client config of %s: remove that detour first",
+					tag, strings.Join(riders, ", "))
+			}
 		}
 		// Deleting a replica (de-adopt) is DB-only; the inbound keeps running
 		// on its node and reconciliation strips the pushed users afterwards.

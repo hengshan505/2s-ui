@@ -137,20 +137,27 @@ func TestJsonSubscriptionParsesAsSingBoxConfig(t *testing.T) {
 				t.Fatalf("the external %s link produced no outbound:\n%s", protocol, *raw)
 			}
 
-			ctx := core.Context(context.Background(), core.InboundRegistry(), core.OutboundRegistry(),
-				core.EndpointRegistry(), core.DNSTransportRegistry(), core.ServiceRegistry(),
-				core.CertificateProviderRegistry())
-			ctx = service.ContextWith[deprecated.Manager](ctx, discardDeprecatedNotes{})
-
-			var opts option.Options
-			if err := opts.UnmarshalJSONContext(ctx, []byte(*raw)); err != nil {
-				t.Fatalf("sing-box cannot parse the subscription: %v\n%s", err, *raw)
-			}
-			instance, err := core.NewBox(core.Options{Context: ctx, Options: opts})
-			if err != nil {
-				t.Fatalf("sing-box parses the subscription but cannot start it: %v\n%s", err, *raw)
-			}
-			instance.Close()
+			buildSingBox(t, *raw)
 		})
 	}
+}
+
+// buildSingBox runs a JSON subscription through the two checks a sing-box
+// subscriber performs: parse the document, then build the box from it.
+func buildSingBox(t *testing.T, raw string) {
+	t.Helper()
+	ctx := core.Context(context.Background(), core.InboundRegistry(), core.OutboundRegistry(),
+		core.EndpointRegistry(), core.DNSTransportRegistry(), core.ServiceRegistry(),
+		core.CertificateProviderRegistry())
+	ctx = service.ContextWith[deprecated.Manager](ctx, discardDeprecatedNotes{})
+
+	var opts option.Options
+	if err := opts.UnmarshalJSONContext(ctx, []byte(raw)); err != nil {
+		t.Fatalf("sing-box cannot parse the subscription: %v\n%s", err, raw)
+	}
+	instance, err := core.NewBox(core.Options{Context: ctx, Options: opts})
+	if err != nil {
+		t.Fatalf("sing-box parses the subscription but cannot start it: %v\n%s", err, raw)
+	}
+	instance.Close()
 }

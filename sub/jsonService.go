@@ -56,7 +56,7 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 		return nil, nil, err
 	}
 
-	outbounds, outTags, err := j.getOutbounds(client.Config, inDatas, client.Remark)
+	outbounds, outTags, links, err := j.getOutbounds(client.Config, inDatas, client.Remark)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,8 +65,10 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 	*outbounds = append(*outbounds, extOutbounds...)
 	*outTags = append(*outTags, extTags...)
 	uniqueOutboundTags(*outbounds, *outTags, defaultOutboundTags...)
+	resolveDetours(*outbounds, links)
 
-	j.addDefaultOutbounds(outbounds, outTags)
+	members := groupMembers(*outTags, links)
+	j.addDefaultOutbounds(outbounds, &members)
 
 	err = json.Unmarshal([]byte(defaultJson), &jsonConfig)
 	if err != nil {
@@ -122,14 +124,40 @@ func (j *JsonService) getData(subId string) (*model.Client, []*model.Inbound, er
 	return client, inbounds, nil
 }
 
-func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound, clientRemark string) (*[]map[string]interface{}, *[]string, error) {
-	var outbounds []map[string]interface{}
+// detourLink is an outbound that dials through another one of the same
+// subscription. Both ends are held as the maps themselves rather than by tag:
+// uniqueOutboundTags may still rename either of them, so the detour is only
+// written, by resolveDetours, once every name is final.
+type detourLink struct {
+	from, to map[string]interface{}
+}
+
+// subEntry is one inbound's client config on its way into the outbound list.
+type subEntry struct {
+	// The inbound tag, which is what a detour in out_json names: the operator
+	// picks it in the client tab, where the subscription's own tags -- remark
+	// and address suffixes included -- are not known yet.
+	inTag    string
+	outbound map[string]interface{}
+	protocol string
+	addrs    []map[string]interface{}
+	copies   []subCopy
+}
+
+// subCopy is what one address of an entry becomes: one outbound, or two for
+// mixed.
+type subCopy struct {
+	remark string // the address's remark, "" for the inbound's own address
+	outs   []map[string]interface{}
+}
+
+func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound, clientRemark string) (*[]map[string]interface{}, *[]string, []detourLink, error) {
 	var configs map[string]interface{}
-	var outTags []string
+	var entries []*subEntry
 
 	err := json.Unmarshal(clientConfig, &configs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, inData := range inbounds {
 		if len(inData.OutJson) < 5 {
@@ -138,7 +166,14 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 		var outbound map[string]interface{}
 		err = json.Unmarshal(inData.OutJson, &outbound)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		// A client half with no protocol: FillOutJson empties a ShadowTLS v1/v2
+		// one down to its tls block, there being no client config the panel
+		// can generate for those. Served anyway it is an outbound with no type,
+		// and sing-box refuses the whole subscription over it.
+		if protocol, _ := outbound["type"].(string); protocol == "" {
+			continue
 		}
 		// Stored out_json may predate the server-only-field filter (#51).
 		if outTlsBase, ok := outbound["tls"].(map[string]interface{}); ok {
@@ -158,7 +193,7 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 			var inbOptions map[string]interface{}
 			err = json.Unmarshal(inData.Options, &inbOptions)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			method, _ := inbOptions["method"].(string)
 			if strings.HasPrefix(method, "2022") {
@@ -210,78 +245,237 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 			}
 		}
 
+		// Stored out_json may predate the SNI shadowTlsOut now writes, and it
+		// is only rewritten when the inbound is saved.
+		if protocol == "shadowtls" {
+			if outTls, ok := outbound["tls"].(map[string]interface{}); ok {
+				if sni, _ := outTls["server_name"].(string); sni == "" {
+					var inbOptions map[string]interface{}
+					if json.Unmarshal(inData.Options, &inbOptions) == nil {
+						if name := util.ShadowTlsServerName(inbOptions); name != "" {
+							outTls["server_name"] = name
+						}
+					}
+				}
+			}
+		}
+
 		var addrs []map[string]interface{}
 		err = json.Unmarshal(inData.Addrs, &addrs)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		tag, _ := outbound["tag"].(string)
-		if len(addrs) == 0 {
-			tag = util.JoinRemark(clientRemark, tag)
-			outbound["tag"] = tag
-			// For mixed protocol, use separated socks and http
-			if protocol == "mixed" {
-				j.pushMixed(&outbounds, &outTags, outbound)
-			} else {
-				outTags = append(outTags, tag)
-				outbounds = append(outbounds, outbound)
+		entries = append(entries, &subEntry{inTag: tag, outbound: outbound, protocol: protocol, addrs: addrs})
+	}
+
+	// Which entry each one dials through. A detour naming one of the client's
+	// own inbounds is the form the client tab writes: that inbound tag means
+	// nothing in the client's config, so it is rewritten from the link by
+	// resolveDetours. Any other detour is left as stored -- it may name an
+	// outbound the subscription carries under exactly that tag, an external
+	// link's say -- and resolveDetours drops it if it names nothing.
+	byTag := make(map[string]*subEntry, len(entries))
+	for _, e := range entries {
+		if e.inTag != "" {
+			byTag[e.inTag] = e
+		}
+	}
+	via := make(map[*subEntry]*subEntry, len(entries))
+	for _, e := range entries {
+		detour, _ := e.outbound["detour"].(string)
+		if target := byTag[detour]; target != nil && target != e {
+			via[e] = target
+		}
+	}
+	// One hop between entries: the target's copies are what the rider's are
+	// built from, so a target riding another entry would need its own built
+	// first. A target whose detour names no entry still counts as a plain one.
+	//
+	// A refused rider loses the detour outright. Left as stored it would be
+	// kept whenever the inbound tag happened to match a final one -- no client
+	// remark, no addresses -- and dropped otherwise, so the same rows would
+	// chain for one client and not for the next.
+	targets := make([]*subEntry, len(entries))
+	for i, e := range entries {
+		target := via[e]
+		if target == nil {
+			continue
+		}
+		if via[target] == nil {
+			targets[i] = target
+		}
+		delete(e.outbound, "detour")
+	}
+
+	for i, e := range entries {
+		if targets[i] == nil {
+			e.copies = addrCopies(e, clientRemark)
+		}
+	}
+	var links []detourLink
+	for i, e := range entries {
+		target := targets[i]
+		if target == nil {
+			continue
+		}
+		// One copy per copy of the target, each riding that address. The
+		// entry's own addresses are not used: whatever it dials through
+		// decides where the connection goes, so its own server and port are
+		// never dialled at all.
+		for _, tc := range target.copies {
+			newOut := cloneOutbound(e.outbound)
+			newOut["tag"] = util.JoinRemark(clientRemark, e.inTag+tc.remark)
+			c := subCopy{remark: tc.remark, outs: splitMixed(e.protocol, newOut)}
+			for _, out := range c.outs {
+				links = append(links, detourLink{from: out, to: tc.outs[0]})
 			}
-		} else {
-			for _, addr := range addrs {
-				// Copy original config
-				newOut := make(map[string]interface{}, len(outbound))
-				for key, value := range outbound {
-					newOut[key] = value
-				}
-				// Clone the TLS map so one address's override can't leak into
-				// the next — the shallow copy above shares it across addrs.
-				if baseTls, ok := outbound["tls"].(map[string]interface{}); ok {
-					tlsCopy := make(map[string]interface{}, len(baseTls))
-					for k, v := range baseTls {
-						tlsCopy[k] = v
-					}
-					newOut["tls"] = tlsCopy
-				}
-				// Change and push copied config
-				server, _ := addr["server"].(string)
-				newOut["server"] = util.NormalizeHost(server)
-				port, _ := addr["server_port"].(float64)
-				newOut["server_port"] = int(port)
+			e.copies = append(e.copies, c)
+		}
+	}
 
-				// Override TLS
-				if addrTls, ok := addr["tls"].(map[string]interface{}); ok {
-					outTls, _ := newOut["tls"].(map[string]interface{})
-					if outTls == nil {
-						outTls = make(map[string]interface{})
-					}
-					for key, value := range addrTls {
-						outTls[key] = value
-					}
-					// Per-address overrides are free-form maps — filter them too (#51).
-					util.StripServerTlsFields(outTls)
-					newOut["tls"] = outTls
-				}
-
-				remark, _ := addr["remark"].(string)
-				// Multiple addresses share one inbound tag, so the name only
-				// needs disambiguating when the addresses don't already carry
-				// distinct remarks. Numbering every one of them renamed nodes
-				// that had no conflict to begin with (upstream #1249); the
-				// uniqueOutboundTags pass below is what handles a real
-				// collision, across every source that feeds this list.
-				newTag := util.JoinRemark(clientRemark, tag+remark)
-				newOut["tag"] = newTag
-				// For mixed protocol, use separated socks and http
-				if protocol == "mixed" {
-					j.pushMixed(&outbounds, &outTags, newOut)
-				} else {
-					outTags = append(outTags, newTag)
-					outbounds = append(outbounds, newOut)
-				}
+	var outbounds []map[string]interface{}
+	var outTags []string
+	for _, e := range entries {
+		for _, c := range e.copies {
+			for _, out := range c.outs {
+				tag, _ := out["tag"].(string)
+				outbounds = append(outbounds, out)
+				outTags = append(outTags, tag)
 			}
 		}
 	}
-	return &outbounds, &outTags, nil
+	return &outbounds, &outTags, links, nil
+}
+
+// addrCopies turns an entry into its outbounds: one per address, or the
+// inbound's own when it has none.
+func addrCopies(e *subEntry, clientRemark string) []subCopy {
+	outbound, tag := e.outbound, e.inTag
+	if len(e.addrs) == 0 {
+		outbound["tag"] = util.JoinRemark(clientRemark, tag)
+		return []subCopy{{outs: splitMixed(e.protocol, outbound)}}
+	}
+	copies := make([]subCopy, 0, len(e.addrs))
+	for _, addr := range e.addrs {
+		newOut := cloneOutbound(outbound)
+		server, _ := addr["server"].(string)
+		newOut["server"] = util.NormalizeHost(server)
+		port, _ := addr["server_port"].(float64)
+		newOut["server_port"] = int(port)
+
+		// Override TLS
+		if addrTls, ok := addr["tls"].(map[string]interface{}); ok {
+			outTls, _ := newOut["tls"].(map[string]interface{})
+			if outTls == nil {
+				outTls = make(map[string]interface{})
+			}
+			for key, value := range addrTls {
+				outTls[key] = value
+			}
+			// Per-address overrides are free-form maps — filter them too (#51).
+			util.StripServerTlsFields(outTls)
+			newOut["tls"] = outTls
+		}
+
+		remark, _ := addr["remark"].(string)
+		// Multiple addresses share one inbound tag, so the name only
+		// needs disambiguating when the addresses don't already carry
+		// distinct remarks. Numbering every one of them renamed nodes
+		// that had no conflict to begin with (upstream #1249); the
+		// uniqueOutboundTags pass below is what handles a real
+		// collision, across every source that feeds this list.
+		newOut["tag"] = util.JoinRemark(clientRemark, tag+remark)
+		copies = append(copies, subCopy{remark: remark, outs: splitMixed(e.protocol, newOut)})
+	}
+	return copies
+}
+
+// cloneOutbound copies an outbound one level deep, plus its TLS map, so one
+// copy's override can't leak into the next -- a shallow copy would share it.
+func cloneOutbound(outbound map[string]interface{}) map[string]interface{} {
+	newOut := make(map[string]interface{}, len(outbound))
+	for key, value := range outbound {
+		newOut[key] = value
+	}
+	if baseTls, ok := outbound["tls"].(map[string]interface{}); ok {
+		tlsCopy := make(map[string]interface{}, len(baseTls))
+		for k, v := range baseTls {
+			tlsCopy[k] = v
+		}
+		newOut["tls"] = tlsCopy
+	}
+	return newOut
+}
+
+// resolveDetours writes each link's detour as the tag its target ended up
+// with, then drops every detour that cannot stand: one naming no outbound in
+// the list -- a target the client is not on, an inbound renamed away -- or
+// closing a loop. sing-box refuses a whole config over either, so the route
+// dials directly instead. It runs after uniqueOutboundTags, which may have
+// renamed either end of a link.
+func resolveDetours(outbounds []map[string]interface{}, links []detourLink) {
+	for _, link := range links {
+		link.from["detour"] = link.to["tag"]
+	}
+	byTag := make(map[string]map[string]interface{}, len(outbounds))
+	for _, out := range outbounds {
+		if tag, ok := out["tag"].(string); ok {
+			byTag[tag] = out
+		}
+	}
+	for _, out := range outbounds {
+		detour, ok := out["detour"].(string)
+		if !ok {
+			continue
+		}
+		if byTag[detour] == nil {
+			delete(out, "detour")
+			continue
+		}
+		// Follow the chain. Coming back to this outbound means its detour
+		// closes a loop; a loop it only leads into is broken when one of that
+		// loop's own outbounds comes up.
+		self, _ := out["tag"].(string)
+		seen := map[string]bool{}
+		for at := byTag[detour]; at != nil; {
+			tag, _ := at["tag"].(string)
+			if tag == self {
+				delete(out, "detour")
+				break
+			}
+			if seen[tag] {
+				break
+			}
+			seen[tag] = true
+			next, _ := at["detour"].(string)
+			at = byTag[next]
+		}
+	}
+}
+
+// groupMembers is the tags the proxy/auto groups offer. A ShadowTLS outbound
+// something dials through is left out: on its own it is no proxy at all -- it
+// drops the destination and carries no UDP -- so offering it as a node only
+// gives the subscriber one that cannot connect.
+func groupMembers(tags []string, links []detourLink) []string {
+	hidden := make(map[string]bool)
+	for _, link := range links {
+		if link.to["type"] == "shadowtls" {
+			tag, _ := link.to["tag"].(string)
+			hidden[tag] = true
+		}
+	}
+	if len(hidden) == 0 {
+		return tags
+	}
+	members := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if !hidden[tag] {
+			members = append(members, tag)
+		}
+	}
+	return members
 }
 
 // defaultOutboundTags are the tags addDefaultOutbounds injects. They are taken
@@ -553,19 +747,21 @@ func needsDefaultHTTPClient(route map[string]interface{}) bool {
 	return false
 }
 
-func (j *JsonService) pushMixed(outbounds *[]map[string]interface{}, outTags *[]string, out map[string]interface{}) {
+// splitMixed is the outbounds one client config becomes: a mixed listener is
+// served as separate socks and http routes, anything else as itself.
+func splitMixed(protocol string, out map[string]interface{}) []map[string]interface{} {
+	if protocol != "mixed" {
+		return []map[string]interface{}{out}
+	}
 	socksOut := make(map[string]interface{}, 1)
 	httpOut := make(map[string]interface{}, 1)
 	for key, value := range out {
 		socksOut[key] = value
 		httpOut[key] = value
 	}
-	socksTag := fmt.Sprintf("%s-socks", out["tag"])
-	httpTag := fmt.Sprintf("%s-http", out["tag"])
 	socksOut["type"] = "socks"
 	httpOut["type"] = "http"
-	socksOut["tag"] = socksTag
-	httpOut["tag"] = httpTag
-	*outbounds = append(*outbounds, socksOut, httpOut)
-	*outTags = append(*outTags, socksTag, httpTag)
+	socksOut["tag"] = fmt.Sprintf("%s-socks", out["tag"])
+	httpOut["tag"] = fmt.Sprintf("%s-http", out["tag"])
+	return []map[string]interface{}{socksOut, httpOut}
 }

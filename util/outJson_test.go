@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/shenaba/2s-ui/database/model"
@@ -480,5 +481,46 @@ func TestFillOutJsonDropsLegacyECHOptions(t *testing.T) {
 		if _, present := ech[removed]; present {
 			t.Errorf("%q must not reach the client config, got %v", removed, ech)
 		}
+	}
+}
+
+// A ShadowTLS client verifies the certificate the handshake server answers
+// with, so it has to send that server's name. Left out, sing-box sends the
+// panel's own address and every connection fails verification.
+func TestFillOutJsonShadowTlsServerName(t *testing.T) {
+	cases := []struct {
+		name, handshake, want string
+	}{
+		{"domain", "www.example.com", "www.example.com"},
+		{"ip has no name to send", "203.0.113.7", ""},
+		{"ipv6", "2001:db8::1", ""},
+		{"bracketed ipv6", "[2001:db8::1]", ""},
+		{"zoned ipv6", "fe80::1%eth0", ""},
+		{"unset", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			inbound := &model.Inbound{
+				Type: "shadowtls", Tag: "stls-in",
+				Options: json.RawMessage(fmt.Sprintf(
+					`{"listen_port":443,"version":3,"handshake":{"server":%q,"server_port":443}}`, c.handshake)),
+				OutJson: json.RawMessage(`{}`),
+			}
+			if err := FillOutJson(inbound, "panel.example.com"); err != nil {
+				t.Fatal(err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(inbound.OutJson, &out); err != nil {
+				t.Fatal(err)
+			}
+			tls, _ := out["tls"].(map[string]interface{})
+			if tls["enabled"] != true {
+				t.Fatalf("tls = %v, want enabled", out["tls"])
+			}
+			got, _ := tls["server_name"].(string)
+			if got != c.want {
+				t.Errorf("server_name = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

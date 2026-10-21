@@ -118,7 +118,7 @@ func (s *ClashService) GetClash(subId string) (*string, []string, error) {
 		return nil, nil, err
 	}
 
-	outbounds, outTags, err := s.getOutbounds(client.Config, inDatas, client.Remark)
+	outbounds, outTags, links, err := s.getOutbounds(client.Config, inDatas, client.Remark)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -127,6 +127,7 @@ func (s *ClashService) GetClash(subId string) (*string, []string, error) {
 	*outbounds = append(*outbounds, extOutbounds...)
 	*outTags = append(*outTags, extTags...)
 	uniqueOutboundTags(*outbounds, *outTags)
+	resolveDetours(*outbounds, links)
 
 	basicConfig, err := s.getClashConfig()
 	if err != nil || len(basicConfig) == 0 {
@@ -156,9 +157,19 @@ func (s *ClashService) getClashConfig() (string, error) {
 func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, basicConfig string) (string, error) {
 	var proxies []interface{}
 	proxyTags := make([]string, 0)
+	// Proxy name -> the proxy it dials through, for detours mihomo spells as
+	// dialer-proxy. Applied once every proxy is known: the target may come
+	// later in the list, or not become a proxy at all.
+	dialerVia := map[string]string{}
 	// One read for all three: they are needed on every subscription fetch and
 	// were three separate SELECTs on the settings table.
 	noDefGrp, sprtAll, defaultUdp, _ := s.SettingService.GetSubClashFlags()
+	byTag := make(map[string]map[string]interface{}, len(*outbounds))
+	for _, obMap := range *outbounds {
+		if tag, ok := obMap["tag"].(string); ok {
+			byTag[tag] = obMap
+		}
+	}
 	for _, obMap := range *outbounds {
 
 		t, _ := obMap["type"].(string)
@@ -273,14 +284,37 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 			continue
 		}
 
+		// mihomo has no ShadowTLS proxy of its own, only the shadowsocks
+		// plugin, so a shadowsocks outbound riding one becomes that single
+		// proxy aimed at the ShadowTLS listener. Anything else riding one has
+		// no form here at all and is left out rather than served as a proxy
+		// that dials its own port directly. A detour to any other outbound is
+		// mihomo's dialer-proxy, settled below.
+		overShadowTls := false
+		if detour, _ := obMap["detour"].(string); detour != "" {
+			if target := byTag[detour]; target != nil && target["type"] == "shadowtls" {
+				if t != "shadowsocks" {
+					continue
+				}
+				shadowTlsPlugin(proxy, target)
+				overShadowTls = true
+			} else if target != nil {
+				dialerVia[obMap["tag"].(string)] = detour
+			}
+		}
+
 		// Mihomo keeps UDP off unless the proxy opts in, and subClashUdp is the
 		// single switch that decides it -- shadowsocks included, which is why
 		// the case above no longer answers for itself. A default, not an
 		// override: an outbound restricted to TCP keeps its answer, since
 		// getOutbounds copies a TCP-only shadowsocks listener's network onto
 		// it even when the operator never opened the client-config tab.
+		//
+		// Not through ShadowTLS, which carries TCP alone: mihomo would send the
+		// plain UDP straight to the ShadowTLS port. UDP over TCP is the way
+		// through, and the shadowsocks case has already turned that on.
 		network, _ := obMap["network"].(string)
-		if defaultUdp && network != "tcp" {
+		if defaultUdp && network != "tcp" && !overShadowTls {
 			switch proxy["type"] {
 			case "vmess", "vless":
 				proxy["udp"] = true
@@ -344,12 +378,8 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 				}
 				proxy["reality-opts"] = reality_opts
 			}
-			if utls, ok := tls["utls"].(map[string]interface{}); ok {
-				if enabled, ok := utls["enabled"].(bool); ok && enabled {
-					if fp, ok := utls["fingerprint"].(string); ok {
-						proxy["client-fingerprint"] = fp
-					}
-				}
+			if fp := clashFingerprint(tls); fp != "" {
+				proxy["client-fingerprint"] = fp
 			}
 			if sni, ok := tls["server_name"].(string); ok {
 				if t == "vless" || t == "vmess" {
@@ -507,6 +537,7 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 		proxies = append(proxies, proxy)
 		proxyTags = append(proxyTags, obMap["tag"].(string))
 	}
+	proxies, proxyTags = applyDialerProxies(proxies, proxyTags, dialerVia)
 
 	// Merge proxies and proxy groups if exist
 	var output map[string]interface{}
@@ -543,6 +574,89 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 		return "", err
 	}
 	return string(result), nil
+}
+
+// applyDialerProxies gives each proxy in via its dialer-proxy. One whose target
+// did not become a proxy -- a type mihomo has no form for, or a proxy dropped
+// here -- is dropped as well, rather than served dialling its own server
+// directly, the way the JSON subscription would never send it. Dropping one can
+// strand another riding it, so it repeats until nothing more goes.
+//
+// proxies and names are parallel, as ConvertToClashMeta builds them.
+func applyDialerProxies(proxies []interface{}, names []string, via map[string]string) ([]interface{}, []string) {
+	if len(via) == 0 {
+		return proxies, names
+	}
+	for {
+		have := make(map[string]bool, len(names))
+		for _, name := range names {
+			have[name] = true
+		}
+		keptProxies := make([]interface{}, 0, len(proxies))
+		keptNames := make([]string, 0, len(names))
+		for i, name := range names {
+			if target, ok := via[name]; ok && !have[target] {
+				continue
+			}
+			keptProxies = append(keptProxies, proxies[i])
+			keptNames = append(keptNames, name)
+		}
+		dropped := len(keptNames) != len(names)
+		proxies, names = keptProxies, keptNames
+		if !dropped {
+			break
+		}
+	}
+	for i, name := range names {
+		if target, ok := via[name]; ok {
+			if proxy, ok := proxies[i].(map[string]interface{}); ok {
+				proxy["dialer-proxy"] = target
+			}
+		}
+	}
+	return proxies, names
+}
+
+// shadowTlsPlugin points a shadowsocks proxy at the ShadowTLS outbound it rides
+// in the sing-box shape, as mihomo's shadow-tls plugin. The connection goes to
+// the ShadowTLS listener, so its address replaces the shadowsocks one, and the
+// plugin's host is the SNI the handshake has to carry.
+func shadowTlsPlugin(proxy map[string]interface{}, target map[string]interface{}) {
+	server, _ := target["server"].(string)
+	proxy["server"] = util.NormalizeHost(server)
+	proxy["port"] = target["server_port"]
+	proxy["plugin"] = "shadow-tls"
+
+	opts := map[string]interface{}{"host": server}
+	if password, ok := target["password"].(string); ok && password != "" {
+		opts["password"] = password
+	}
+	if version, ok := util.AsInt64(target["version"]); ok {
+		opts["version"] = int(version)
+	}
+	if tls, ok := target["tls"].(map[string]interface{}); ok {
+		if sni, _ := tls["server_name"].(string); sni != "" {
+			opts["host"] = sni
+		}
+		if fp := clashFingerprint(tls); fp != "" {
+			proxy["client-fingerprint"] = fp
+		}
+	}
+	proxy["plugin-opts"] = opts
+}
+
+// clashFingerprint is the client-fingerprint mihomo wants for a sing-box TLS
+// block: the uTLS fingerprint when uTLS is on, "" otherwise. enabled is read
+// the way the TLS block's own enabled is, through AsBool. An empty fingerprint
+// is "" as well, rather than a `client-fingerprint: ""` mihomo has to make
+// sense of.
+func clashFingerprint(tls map[string]interface{}) string {
+	utls, ok := tls["utls"].(map[string]interface{})
+	if !ok || !util.AsBool(utls["enabled"]) {
+		return ""
+	}
+	fp, _ := utls["fingerprint"].(string)
+	return fp
 }
 
 func buildProxyGroups(output map[string]interface{}, proxyTags []string, noDefGrp bool, sprtAll bool) error {

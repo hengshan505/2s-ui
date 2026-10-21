@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"net/netip"
 
 	"github.com/shenaba/2s-ui/util/common"
 
@@ -235,7 +236,29 @@ func shadowTlsOut(out *map[string]interface{}, inbound map[string]interface{}) {
 			delete(*out, key)
 		}
 	}
-	(*out)["tls"] = map[string]interface{}{"enabled": true}
+	tls := map[string]interface{}{"enabled": true}
+	if name := ShadowTlsServerName(inbound); name != "" {
+		tls["server_name"] = name
+	}
+	(*out)["tls"] = tls
+}
+
+// ShadowTlsServerName is the SNI a ShadowTLS client has to send: the name of
+// the inbound's handshake server. The client runs a real TLS handshake, which
+// the listener relays to that server, and verifies the certificate it gets
+// back -- so the default, the panel's own address, fails on every connection.
+// An IP handshake server has no name to send and leaves it to the default.
+//
+// options is the inbound's options, spread or not: only handshake is read.
+func ShadowTlsServerName(options map[string]interface{}) string {
+	handshake, _ := options["handshake"].(map[string]interface{})
+	server, _ := handshake["server"].(string)
+	// Bracketed or zoned, an IPv6 literal is still an address: ParseIP takes
+	// neither form and let "[2001:db8::1]" through as a name.
+	if _, err := netip.ParseAddr(NormalizeHost(server)); server == "" || err == nil {
+		return ""
+	}
+	return server
 }
 
 // hysteriaQUICFieldsFromInbound are the transport options seeded from the
