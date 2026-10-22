@@ -16,8 +16,10 @@ import (
 // The websocket hub pushes to the panel SPA what it used to poll over HTTP:
 //
 //	topic "load"   — the api/load payload: full snapshot on subscribe (lu-gated),
-//	                 onlines after every stats flush, nodesStatus after every
-//	                 node probe, and the full config payload when it changes.
+//	                 onlines after every stats flush, clientRates after every
+//	                 2s rate sample (and on the snapshot, never on the other
+//	                 pushes), nodesStatus after every node probe, and the full
+//	                 config payload when it changes.
 //	topic "status" — the api/status sample, from a 2s ticker that only runs
 //	                 while at least one client subscribes.
 //	topic "stats"  — the api/stats rows for one (resource, tag, period),
@@ -359,6 +361,9 @@ func (h *Hub) subscribe(c *hubClient, topic string, params json.RawMessage) {
 		c.mu.Lock()
 		c.subLoad = true
 		c.mu.Unlock()
+		// Before the snapshot, so a subscriber after a pause starts the rate
+		// window now instead of at the next tick.
+		resumeClientRates(time.Now())
 		if c.allowQuery("load", time.Now()) {
 			h.sendLoadSnapshot(c, p.Lu)
 		}
@@ -675,6 +680,8 @@ func (h *Hub) pushFullPayloads() {
 			logger.Warning("ws: build config push failed: ", err)
 			continue
 		}
+		// A push, not an answer: the rates have their own (see attachClientRates).
+		delete(data, "clientRates")
 		seedNodesStatus(data)
 		msg := hubEnvelope("load", data)
 		for _, c := range subs {
@@ -772,4 +779,42 @@ func HubPushNodesStatus() {
 	h.broadcastLoad(hubEnvelope("load", map[string]interface{}{
 		"nodesStatus": statuses,
 	}))
+}
+
+// TickClientRates is the client-rate job: while some tab subscribes to the
+// live payload, sample the rates and push them; otherwise pause sampling. One
+// walk over the subscribers answers both.
+func TickClientRates() {
+	h := getHub()
+	var subs []*hubClient
+	if h != nil {
+		subs = h.loadSubscribers()
+	}
+	if len(subs) == 0 {
+		// A tab that subscribed after the list was taken resumes on its own,
+		// before this pause or after it. Before it, the pause would undo that
+		// resume while the tab watches -- and the next tab to subscribe would
+		// take a second baseline -- so look again once paused. With no hub
+		// (StopHub ran under a tick cron.Stop did not wait for) there is no
+		// one to look for.
+		if pauseClientRates() && h != nil && len(h.loadSubscribers()) > 0 {
+			resumeClientRates(time.Now())
+		}
+		return
+	}
+	ratesLive.Store(true)
+	sampleClientRates(time.Now())
+	h.pushClientRates(subs)
+}
+
+// pushClientRates sends the rates alone: they move every tick, and the rest of
+// the live payload only at the stats flush. Sent on every tick, empty
+// included, rather than skipping empty→empty: a snapshot built just before a
+// sample can still land after its push, and the next tick is what corrects it.
+func (h *Hub) pushClientRates(subs []*hubClient) {
+	var ss StatsService
+	msg := hubEnvelope("load", map[string]interface{}{"clientRates": ss.GetClientRates()})
+	for _, c := range subs {
+		h.enqueue(c, msg)
+	}
 }

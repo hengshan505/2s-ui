@@ -58,6 +58,8 @@ func (c *CronJob) Start(loc *time.Location, trafficAge int, statsBucketSeconds i
 	addJob("@every 10s", statsJob, "stats job")
 	// So a shutdown can flush once more before it stops the core.
 	service.SetStatsFlush(statsJob.Run)
+	// Per-client rates for the clients list, sampled apart from the flush
+	addJob("@every 2s", NewClientRateJob(), "client rate job")
 	// Enforce per-client IP limits (no-op unless some client sets one)
 	addJob("@every 10s", NewIpLimitJob(), "ip limit job")
 	addJob("@every 10s", NewClusterIPLimitJob(), "cluster IP limit job")

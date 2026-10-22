@@ -361,3 +361,179 @@ func TestHubServeSubscribeAndDisconnect(t *testing.T) {
 		t.Errorf("client still registered %v after disconnect: %d", time.Since(deadline), got)
 	}
 }
+
+// The 2s rate push carries the rates alone, reaches load subscribers only, and
+// goes out empty too -- the frontend reads a missing key as "unchanged", and
+// every tick is what corrects a snapshot that landed after a newer push.
+func TestPushClientRates(t *testing.T) {
+	StartHub()
+	defer StopHub()
+	h := getHub()
+	resetClientRates(t)
+
+	sub := &hubClient{send: make(chan []byte, hubSendBuffer), closed: make(chan struct{}), subLoad: true}
+	other := &hubClient{send: make(chan []byte, hubSendBuffer), closed: make(chan struct{})}
+	h.mu.Lock()
+	h.clients[sub] = struct{}{}
+	h.clients[other] = struct{}{}
+	h.mu.Unlock()
+	// Before StopHub (LIFO): these clients have no conn.
+	defer func() {
+		h.mu.Lock()
+		delete(h.clients, sub)
+		delete(h.clients, other)
+		h.mu.Unlock()
+	}()
+
+	next := func() map[string]json.RawMessage {
+		t.Helper()
+		select {
+		case msg := <-sub.send:
+			var env struct {
+				Topic string                     `json:"topic"`
+				Data  map[string]json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(msg, &env); err != nil {
+				t.Fatalf("push is not valid JSON: %v", err)
+			}
+			if env.Topic != "load" {
+				t.Errorf("topic = %q, want load", env.Topic)
+			}
+			return env.Data
+		default:
+			return nil
+		}
+	}
+
+	setClientRates(map[string]ClientRate{"alice": {Up: 1, Down: 2}})
+	h.pushClientRates(h.loadSubscribers())
+	data := next()
+	if len(data) != 1 || string(data["clientRates"]) != `{"alice":{"up":1,"down":2}}` {
+		t.Errorf("push = %s, want clientRates alone", data)
+	}
+	if len(other.send) != 0 {
+		t.Error("a client not subscribed to load got the push")
+	}
+
+	setClientRates(map[string]ClientRate{})
+	for range 2 {
+		h.pushClientRates(h.loadSubscribers())
+		if data := next(); string(data["clientRates"]) != `{}` {
+			t.Errorf("push with nobody moving = %s, want an empty map", data)
+		}
+	}
+}
+
+// With no tab subscribed the first tick stops sampling and empties the rates,
+// so api/load does not serve stale ones; the idle ticks after it touch nothing,
+// and the next subscriber resumes it.
+func TestTickClientRatesPausesAndResumes(t *testing.T) {
+	StartHub()
+	defer StopHub()
+	resetClientRates(t)
+	t.Cleanup(func() { ratesLive.Store(false) })
+
+	ratesLive.Store(true)
+	setClientRates(map[string]ClientRate{"alice": {Up: 1}})
+	TickClientRates()
+	if ratesLive.Load() {
+		t.Error("a tick with no subscriber left sampling live")
+	}
+	var ss StatsService
+	if rates := ss.GetClientRates(); len(rates) != 0 {
+		t.Errorf("rates while nobody watches = %v, want none", rates)
+	}
+	marker := map[string]ClientRate{"bob": {Up: 7}}
+	setClientRates(marker)
+	TickClientRates()
+	if rates := ss.GetClientRates(); rates["bob"].Up != 7 {
+		t.Errorf("an idle tick after the pause rewrote the rates to %v", rates)
+	}
+
+	resumeClientRates(time.Now())
+	if !ratesLive.Load() {
+		t.Error("the first subscriber after a pause did not resume sampling")
+	}
+}
+
+// cron.Stop does not wait for a tick already running, and StopHub runs right
+// after it: a tick that finds no hub while sampling is live pauses it, and
+// must not look for subscribers on the hub that is gone.
+func TestTickClientRatesWithNoHub(t *testing.T) {
+	StopHub()
+	resetClientRates(t)
+	t.Cleanup(func() { ratesLive.Store(false) })
+
+	ratesLive.Store(true)
+	setClientRates(map[string]ClientRate{"alice": {Up: 1}})
+	TickClientRates()
+	if ratesLive.Load() {
+		t.Error("a tick with no hub left sampling live")
+	}
+	var ss StatsService
+	if rates := ss.GetClientRates(); len(rates) != 0 {
+		t.Errorf("rates with no hub = %v, want none", rates)
+	}
+}
+
+// Only the answer to a load request carries the rates; the periodic pushes,
+// built on other goroutines, could otherwise land after a newer rate push.
+func TestClientRatesOnlyOnLoadAnswers(t *testing.T) {
+	maintenanceEnv(t)
+	resetClientRates(t)
+	var pd PanelDataService
+	live, err := pd.LivePayload()
+	if err != nil {
+		t.Fatalf("live payload: %v", err)
+	}
+	if _, ok := live["clientRates"]; !ok {
+		t.Error("api/load's live answer lacks clientRates")
+	}
+	full, err := pd.FullPayload("test.local")
+	if err != nil {
+		t.Fatalf("full payload: %v", err)
+	}
+	if _, ok := full["clientRates"]; !ok {
+		t.Error("api/load's full answer lacks clientRates")
+	}
+	onlines, err := pd.OnlinesPayload()
+	if err != nil {
+		t.Fatalf("onlines payload: %v", err)
+	}
+	if _, ok := onlines["clientRates"]; ok {
+		t.Error("the 10s onlines push carries clientRates")
+	}
+
+	// The config push is built from FullPayload, and has to take them off.
+	StartHub()
+	defer StopHub()
+	h := getHub()
+	sub := &hubClient{send: make(chan []byte, hubSendBuffer), closed: make(chan struct{}), subLoad: true, hostname: "test.local"}
+	h.mu.Lock()
+	h.clients[sub] = struct{}{}
+	h.mu.Unlock()
+	// Before StopHub (LIFO): this client has no conn.
+	defer func() {
+		h.mu.Lock()
+		delete(h.clients, sub)
+		h.mu.Unlock()
+	}()
+	h.pushFullPayloads()
+	select {
+	case msg := <-sub.send:
+		var env struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Fatalf("config push is not valid JSON: %v", err)
+		}
+		if _, ok := env.Data["config"]; !ok {
+			t.Errorf("config push lacks the config: %v", env.Data)
+		}
+		if _, ok := env.Data["clientRates"]; ok {
+			t.Error("the config push carries clientRates")
+		}
+	default:
+		t.Fatal("pushFullPayloads sent nothing to a load subscriber")
+	}
+}

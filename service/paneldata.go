@@ -94,10 +94,6 @@ func (s *PanelDataService) onlinesHalf() (map[string]interface{}, error) {
 	// with traffic, not with config, so carrying it on the config half would
 	// freeze it until the next save.
 	data["inboundTraffic"] = s.StatsService.GetInboundTraffic()
-	// Always sent, even empty, for the same reason as ipCounts: a missing key
-	// reads as "unchanged", which would keep the last rates on screen after
-	// everyone stopped.
-	data["clientRates"] = s.StatsService.GetClientRates()
 	return data, nil
 }
 
@@ -109,6 +105,7 @@ func (s *PanelDataService) LivePayload() (map[string]interface{}, error) {
 		return nil, err
 	}
 	s.attachNodesStatus(data)
+	s.attachClientRates(data)
 	return data, nil
 }
 
@@ -301,7 +298,18 @@ func (s *PanelDataService) FullPayload(hostname string) (map[string]interface{},
 	// live push look stale.
 	data["clientsSeq"] = seq
 	s.attachNodesStatus(data)
+	s.attachClientRates(data)
 	return data, nil
+}
+
+// attachClientRates puts the rates on the answer to a load request only -- the
+// HTTP api/load and the websocket subscribe snapshot -- so a page opens with
+// them. The periodic pushes leave them to their own 2s push (pushClientRates):
+// a payload reads the rates when it is built, on another goroutine, and one
+// landing after a newer rate push would put an older speed back on screen.
+// Always sent, even empty: a missing key reads as "unchanged".
+func (s *PanelDataService) attachClientRates(data map[string]interface{}) {
+	data["clientRates"] = s.StatsService.GetClientRates()
 }
 
 // attachNodesStatus rides live node status outside the lu gate (it changes

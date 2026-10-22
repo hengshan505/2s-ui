@@ -373,7 +373,7 @@ export default {
   dLeft: "剩 {n} 天",
   daysWord: "天",
   colRate: "速率",
-  rateTitle: "最近 10 秒的平均速率，不含節點上的流量",
+  rateTitle: "最近幾秒的平均速率，不含節點上的流量",
   resetInDays: "{n} 天後重置",
   resetSoon: "24 小時內重置",
   nextResetAt: "下次流量重置：{date}",

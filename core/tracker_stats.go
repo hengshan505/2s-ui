@@ -25,6 +25,21 @@ type StatsTracker struct {
 	inbounds  map[string]Counter
 	outbounds map[string]Counter
 	users     map[string]Counter
+
+	// Rate sampling over the user counters, without a second set of counters on
+	// the data path: SampleUsers reads them in place, and GetStats, which
+	// empties them, books what it took into drained so the next sample still
+	// sees it. All three are guarded by access.
+	sampled   map[string]UserBytes // each user counter as the last sample read it
+	drained   map[string]UserBytes // taken out by GetStats since the last sample
+	sampledAt time.Time
+}
+
+// UserBytes is one user's traffic in each direction, named from the client's
+// side as the stats rows are: Up is what it sent, Down what it received.
+type UserBytes struct {
+	Up   int64
+	Down int64
 }
 
 func NewStatsTracker() *StatsTracker {
@@ -32,6 +47,11 @@ func NewStatsTracker() *StatsTracker {
 		inbounds:  make(map[string]Counter),
 		outbounds: make(map[string]Counter),
 		users:     make(map[string]Counter),
+		sampled:   make(map[string]UserBytes),
+		drained:   make(map[string]UserBytes),
+		// Every counter starts at zero here, so this is where the first
+		// sample's window starts.
+		sampledAt: time.Now(),
 	}
 }
 
@@ -41,6 +61,9 @@ func (c *StatsTracker) Reset() {
 	c.inbounds = make(map[string]Counter)
 	c.outbounds = make(map[string]Counter)
 	c.users = make(map[string]Counter)
+	c.sampled = make(map[string]UserBytes)
+	c.drained = make(map[string]UserBytes)
+	c.sampledAt = time.Now()
 }
 
 func (c *StatsTracker) getReadCounters(inbound string, outbound string, user string) ([]*atomic.Int64, []*atomic.Int64) {
@@ -109,9 +132,55 @@ func (c *StatsTracker) GetStats() *[]model.Stats {
 		appendStat("outbound", outbound, counter.write.Swap(0), counter.read.Swap(0))
 	}
 	for user, counter := range c.users {
-		appendStat("user", user, counter.write.Swap(0), counter.read.Swap(0))
+		down, up := counter.write.Swap(0), counter.read.Swap(0)
+		appendStat("user", user, down, up)
+		if down != 0 || up != 0 {
+			d := c.drained[user]
+			d.Up += up
+			d.Down += down
+			c.drained[user] = d
+		}
 	}
 	return &s
+}
+
+// SampleUsers reports what each user moved since the previous sample, and how
+// long ago that was. It reads the counters without emptying them -- GetStats
+// owns that, on its own schedule -- so a user's bytes since the last sample
+// are its counter now, plus whatever GetStats drained in between, minus the
+// counter as the last sample read it. Bytes added between the read here and a
+// later drain are not lost: the drain books them, and the next sample counts
+// them. Users that moved nothing are left out. The first sample measures from
+// when the tracker was made or last Reset, when every counter was zero.
+//
+// A window shorter than minWindow is not closed: ok is false, nothing moves,
+// and its bytes roll into the next sample. Dividing a few milliseconds' bytes
+// by a floored window would show a speed nobody had; dividing by the real one
+// would show a burst nobody sent.
+func (c *StatsTracker) SampleUsers(now time.Time, minWindow time.Duration) (moved map[string]UserBytes, window time.Duration, ok bool) {
+	c.access.Lock()
+	defer c.access.Unlock()
+
+	window = now.Sub(c.sampledAt)
+	if window < minWindow {
+		return nil, window, false
+	}
+	moved = make(map[string]UserBytes)
+	for user, counter := range c.users {
+		cur := UserBytes{Up: counter.read.Load(), Down: counter.write.Load()}
+		prev, drained := c.sampled[user], c.drained[user]
+		delta := UserBytes{
+			Up:   cur.Up + drained.Up - prev.Up,
+			Down: cur.Down + drained.Down - prev.Down,
+		}
+		if delta.Up != 0 || delta.Down != 0 {
+			moved[user] = delta
+		}
+		c.sampled[user] = cur
+	}
+	clear(c.drained)
+	c.sampledAt = now
+	return moved, window, true
 }
 
 // RoutedFlow is sing-box 1.14's hook for tracking a TUN flow. Counters here are

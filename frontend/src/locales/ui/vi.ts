@@ -373,7 +373,7 @@ export default {
   dLeft: "còn {n} ngày",
   daysWord: "ngày",
   colRate: "Tốc độ",
-  rateTitle: "Trung bình 10 giây gần nhất, không gồm lưu lượng trên các node",
+  rateTitle: "Trung bình vài giây gần nhất, không gồm lưu lượng trên các node",
   resetInDays: "Đặt lại sau {n} ngày",
   resetSoon: "Đặt lại trong 24 giờ",
   nextResetAt: "Lần đặt lại lưu lượng tiếp theo: {date}",

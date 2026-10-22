@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shenaba/2s-ui/core"
 	"github.com/shenaba/2s-ui/database"
 	"github.com/shenaba/2s-ui/database/model"
 	"github.com/shenaba/2s-ui/logger"
@@ -37,7 +38,7 @@ func setOnlines(o onlines) {
 	onlineMu.Unlock()
 }
 
-// ClientRate is one client's throughput over the last stats window, in bytes
+// ClientRate is one client's throughput over the last rate sample, in bytes
 // per second, summed across every inbound it is on -- the same scope as its
 // up/down totals.
 type ClientRate struct {
@@ -45,9 +46,9 @@ type ClientRate struct {
 	Down int64 `json:"down"`
 }
 
-// Per-client rates from the last flush, published next to the online lists and
-// guarded by the same lock. Replaced wholesale on every flush and never written
-// in place, so a reader may hand the map out as it is.
+// Per-client rates from the last sample, guarded by the online lists' lock.
+// Replaced wholesale on every sample and never written in place, so a reader
+// may hand the map out as it is.
 var clientRates = map[string]ClientRate{}
 
 func setClientRates(rates map[string]ClientRate) {
@@ -56,68 +57,90 @@ func setClientRates(rates map[string]ClientRate) {
 	onlineMu.Unlock()
 }
 
-// When the core's counters were last emptied, which is where the next rate
-// window starts. Both drains move it -- a flush, and carryOverStats just before
-// a stop -- and they run on different goroutines.
-var (
-	drainMu   sync.Mutex
-	lastDrain time.Time
-)
-
-// markDrain records a drain at now and returns the length of the window it
-// closed, or zero when there was no earlier drain to measure from.
-func markDrain(now time.Time) time.Duration {
-	drainMu.Lock()
-	defer drainMu.Unlock()
-	prev := lastDrain
-	lastDrain = now
-	if prev.IsZero() {
-		return 0
-	}
-	return now.Sub(prev)
-}
-
-// minRateWindow floors the window rates are divided by. A flush landing just
-// after carryOverStats drained the core closes a window of a few milliseconds,
-// and dividing its bytes by that would publish a burst nobody sent.
+// minRateWindow is the shortest window a sample closes (see SampleUsers). A
+// tick landing right after another -- or right after the baseline the first
+// subscriber takes -- leaves the published rates alone and measures next time.
 const minRateWindow = time.Second
 
-// ratesOf turns one drain into per-client rates over the window it covered.
+// maxRateWindow is the longest window still published as a current speed.
+// Sampling pauses while no tab is watching, and the first sample after that
+// would otherwise show an average over however long the panel sat closed.
+const maxRateWindow = 5 * time.Second
+
+// ratesOf turns one sample into per-client rates over the window it covered.
+// A window outside (0, maxRateWindow] is no current speed, and nothing is
+// published for it rather than a guess.
 //
-// It takes the drain alone, never the rows carried over from a failed commit:
-// those are bytes from earlier windows, and counting them again would show a
-// client at twice its speed for one flush after every SQLITE_BUSY. For the same
-// reason the rate is not derived from the clients' up/down: a node's traffic is
+// The rate is sampled from the core's counters on its own short tick
+// (TickClientRates), not taken from the stats flush: that one runs every 10s
+// for the database's sake, and a rate that only moved that often read as
+// stuck. Nor is it derived from the clients' up/down: a node's traffic is
 // folded into those a minute at a time, and a traffic reset sends them back to
-// zero. With no window -- the first drain since start, whose counters ran from
-// whenever the core started -- nothing is published rather than a guess.
-func ratesOf(drained []model.Stats, window time.Duration) map[string]ClientRate {
+// zero.
+func ratesOf(moved map[string]core.UserBytes, window time.Duration) map[string]ClientRate {
 	rates := map[string]ClientRate{}
-	if window <= 0 {
+	if window <= 0 || window > maxRateWindow {
 		return rates
 	}
-	window = max(window, minRateWindow)
-	bytes := map[string]ClientRate{}
-	for _, stat := range drained {
-		if stat.Resource != "user" {
-			continue
-		}
-		b := bytes[stat.Tag]
-		if stat.Direction {
-			b.Up += stat.Traffic
-		} else {
-			b.Down += stat.Traffic
-		}
-		bytes[stat.Tag] = b
-	}
 	seconds := window.Seconds()
-	for name, b := range bytes {
+	for name, b := range moved {
 		rates[name] = ClientRate{
 			Up:   int64(float64(b.Up) / seconds),
 			Down: int64(float64(b.Down) / seconds),
 		}
 	}
 	return rates
+}
+
+// Whether rate sampling is on: set by the first subscriber after a pause
+// (resumeClientRates) or by a tick that finds one, cleared by the tick that
+// finds none (pauseClientRates). True does not mean a tick has sampled yet --
+// right after a subscribe only the baseline has. Sampling walks every user
+// under the lock each new connection's routing takes, so it only runs while a
+// tab is watching (TickClientRates).
+var ratesLive atomic.Bool
+
+// sampleClientRates publishes every client's throughput since the previous
+// sample. With the core down there is nothing to sample and the rates go
+// empty, as they would for a core with no traffic; a window too short to
+// close leaves the published rates as they are.
+func sampleClientRates(now time.Time) {
+	rates := map[string]ClientRate{}
+	if corePtr != nil && corePtr.IsRunning() {
+		if box := corePtr.GetInstance(); box != nil {
+			if st := box.StatsTracker(); st != nil {
+				moved, window, ok := st.SampleUsers(now, minRateWindow)
+				if !ok {
+					return
+				}
+				rates = ratesOf(moved, window)
+			}
+		}
+	}
+	setClientRates(rates)
+}
+
+// pauseClientRates stops sampling once the last tab is gone, emptying the
+// rates so api/load does not serve the last ones as current. Only the tick
+// that finds sampling live does anything; the idle ones after it touch
+// nothing. Reports whether it paused.
+func pauseClientRates() bool {
+	if !ratesLive.CompareAndSwap(true, false) {
+		return false
+	}
+	setClientRates(map[string]ClientRate{})
+	return true
+}
+
+// resumeClientRates runs when a tab subscribes. On the first one after a pause
+// it samples at once: that sample spans the pause and is dropped by
+// maxRateWindow, but it starts a window, so the next tick already has a speed
+// to show rather than the one after it. Later subscribers find sampling live
+// and leave the window alone.
+func resumeClientRates(now time.Time) {
+	if ratesLive.CompareAndSwap(false, true) {
+		sampleClientRates(now)
+	}
 }
 
 // Per-inbound traffic totals, published on the live payload and written by the
@@ -283,9 +306,6 @@ func carryOverStats() {
 		return
 	}
 	drained := *box.StatsTracker().GetStats()
-	// The next flush's window starts here: what came before it is in this
-	// drain, not in the next one.
-	markDrain(time.Now())
 	if len(drained) == 0 {
 		return
 	}
@@ -331,10 +351,6 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 			}
 		}
 	}
-	// Marked with the core down too, so the first window after it comes back
-	// is measured from this flush rather than from before the outage.
-	setClientRates(ratesOf(*drained, markDrain(time.Now())))
-
 	// Built locally, then published in one swap at the end — writing the live
 	// struct field by field is what raced with readers.
 	var fresh onlines
@@ -575,7 +591,7 @@ func (s *StatsService) GetOnlines() (onlines, error) {
 }
 
 // GetClientRates reports the throughput of each client that moved traffic in
-// the last stats window. Local core only: a node's clients reach this panel's
+// the last rate sample. Local core only: a node's clients reach this panel's
 // totals through NodeTrafficJob a minute at a time, which is no basis for a
 // rate, so a client a node serves has only its local share here -- and one
 // served by nodes alone shows online with no rate at all.

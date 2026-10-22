@@ -373,7 +373,7 @@ export default {
   dLeft: "{n} روز مانده",
   daysWord: "روز",
   colRate: "سرعت",
-  rateTitle: "میانگین 10 ثانیهٔ اخیر، بدون ترافیک نودها",
+  rateTitle: "میانگین چند ثانیهٔ اخیر، بدون ترافیک نودها",
   resetInDays: "بازنشانی تا {n} روز دیگر",
   resetSoon: "بازنشانی در 24 ساعت آینده",
   nextResetAt: "بازنشانی بعدی ترافیک: {date}",

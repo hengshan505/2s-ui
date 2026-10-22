@@ -373,7 +373,7 @@ export default {
   dLeft: "{n}d left",
   daysWord: "days",
   colRate: "Speed",
-  rateTitle: "Average over the last 10 seconds, excluding traffic on nodes",
+  rateTitle: "Average over the last few seconds, excluding traffic on nodes",
   resetInDays: "Resets in {n}d",
   resetSoon: "Resets within 24h",
   nextResetAt: "Next traffic reset: {date}",
