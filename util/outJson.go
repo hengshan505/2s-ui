@@ -93,6 +93,22 @@ func FillOutJson(i *model.Inbound, hostname string) error {
 // the panel is not the only thing that ever wrote this column.
 var serverOnlyTlsFields = []string{"certificate_path", "key", "key_path", "acme", "certificate_provider"}
 
+// endpointOnlyTlsFields are what an OpenConnect or OpenVPN endpoint using this
+// TLS config needs about its own connection: the client certificate it
+// presents, and the server fingerprints it accepts. They belong to the
+// template's client side, where the endpoint projection reads them, so
+// StripServerTlsFields -- which also cleans the stored template -- must leave
+// them be. But the certificate is the panel's own VPN credential, not something
+// every subscriber of an inbound sharing the template should be handed, the
+// paths name files on the panel host, and peer_fingerprint is no sing-box
+// outbound field at all: a client refuses the whole config on it. So only the
+// client-facing copy drops them.
+//
+// The endpoint's server CA lives in the same side under client.certificate,
+// which is also the field a subscriber's trust goes in; addTls replaces it
+// rather than drop it.
+var endpointOnlyTlsFields = []string{"client_certificate", "client_certificate_path", "client_key", "client_key_path", "peer_fingerprint"}
+
 // serverOnlyEchFields hold the server's ECH private key inside the nested
 // ech object; the client-side ech fields (config, config_path, ...) stay.
 var serverOnlyEchFields = []string{"key", "key_path"}
@@ -150,6 +166,10 @@ func addTls(out *map[string]interface{}, tls *model.Tls) {
 	if maxVersion, ok := tlsServer["max_version"]; ok {
 		tlsConfig["max_version"] = maxVersion
 	}
+	// A stored client.certificate is the CA an endpoint verifies its own VPN
+	// server with. A subscriber trusts this inbound's certificate, or the pin,
+	// or the system roots -- never that.
+	delete(tlsConfig, "certificate")
 	if _, pinned := tlsConfig["certificate_public_key_sha256"]; !pinned {
 		if certificate, ok := tlsServer["certificate"]; ok {
 			tlsConfig["certificate"] = certificate
@@ -195,6 +215,9 @@ func addTls(out *map[string]interface{}, tls *model.Tls) {
 	// The client config is stored alongside the server config and may carry
 	// server-only fields (legacy rows, upstream imports) — never ship them.
 	StripServerTlsFields(tlsConfig)
+	for _, field := range endpointOnlyTlsFields {
+		delete(tlsConfig, field)
+	}
 
 	(*out)["tls"] = tlsConfig
 }

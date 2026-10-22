@@ -2,7 +2,7 @@
   <div>
     <SectionLabel style="margin-bottom: 12px;">OpenConnect</SectionLabel>
     <div class="grid2">
-      <Field :label="$t('out.server')">
+      <Field :label="$t('out.addr')">
         <input class="input mono" v-model="data.server" />
       </Field>
       <Field :label="$t('types.ovpn.flavor')">

@@ -524,3 +524,63 @@ func TestFillOutJsonShadowTlsServerName(t *testing.T) {
 		})
 	}
 }
+
+// The client side of a TLS template also carries what an OpenConnect or
+// OpenVPN endpoint needs for its own connection: the client certificate it
+// presents, the CA and fingerprints it checks its server against. An inbound
+// sharing the template must not hand any of that to its subscribers -- the
+// certificate is a credential, the paths name panel-host files, and
+// peer_fingerprint is a field sing-box clients reject -- while the stored
+// template keeps all of it, since the endpoint projection reads it from there.
+func TestFillOutJsonKeepsTheEndpointTlsToItself(t *testing.T) {
+	client := `{"enabled":true,"certificate":"VPN-CA","peer_fingerprint":["ab12"],` +
+		`"client_certificate":["c"],"client_certificate_path":"/p/c.pem","client_key":["k"],"client_key_path":"/p/k.pem"}`
+	build := func(server string) map[string]interface{} {
+		t.Helper()
+		inbound := &model.Inbound{
+			Type: "trojan", Tag: "tr-in",
+			TlsId: 1,
+			Tls: &model.Tls{
+				Server: json.RawMessage(server),
+				Client: json.RawMessage(client),
+			},
+			Options: json.RawMessage(`{"listen_port":443}`),
+			OutJson: json.RawMessage(`{}`),
+		}
+		if err := FillOutJson(inbound, "example.com"); err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(inbound.OutJson, &out); err != nil {
+			t.Fatal(err)
+		}
+		tls, _ := out["tls"].(map[string]interface{})
+		return tls
+	}
+
+	// A provider-issued certificate: nothing for a subscriber to pin or trust
+	// beyond the system roots, so no certificate at all -- not the VPN's CA.
+	tls := build(`{"enabled":true,"server_name":"example.com"}`)
+	if tls["server_name"] != "example.com" {
+		t.Fatalf("the rest of the client config must still be built, got %v", tls)
+	}
+	for _, field := range []string{"certificate", "peer_fingerprint", "client_certificate", "client_certificate_path", "client_key", "client_key_path"} {
+		if _, present := tls[field]; present {
+			t.Errorf("%q must not reach a subscriber, got %v", field, tls)
+		}
+	}
+
+	// The inbound's own certificate is what a subscriber trusts.
+	tls = build(`{"enabled":true,"server_name":"example.com","certificate":["SRV"]}`)
+	if got := fmt.Sprint(tls["certificate"]); got != "[SRV]" {
+		t.Errorf("certificate = %v, want the inbound's own [SRV]", tls["certificate"])
+	}
+
+	stored := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(client), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if StripServerTlsFields(stored) {
+		t.Errorf("cleaning the stored template must keep the endpoint's TLS, left %v", stored)
+	}
+}

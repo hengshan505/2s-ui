@@ -16,7 +16,7 @@
     </div>
 
     <div v-if="!isServer" class="grid2">
-      <Field :label="$t('out.server')">
+      <Field :label="$t('out.addr')">
         <input class="input mono" v-model="data.server" />
       </Field>
       <Field :label="$t('out.port')">
@@ -59,6 +59,20 @@
         <input class="input mono" v-model="auth" placeholder="SHA256" />
       </Field>
     </div>
+
+    <!-- tls mode negotiates the data cipher out of data_ciphers; static_key
+         has no session to negotiate in, and sing-box refuses both there. -->
+    <template v-if="mode !== 'static_key'">
+      <Field :label="$t('types.ovpn.dataCiphers')" :hint="$t('types.ovpn.dataCiphersHint')">
+        <ChipSelect v-model="dataCiphers" :options="DATA_CIPHERS" placeholder="AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305" />
+      </Field>
+      <Field :label="$t('types.ovpn.fallbackCipher')" :hint="$t('types.ovpn.fallbackCipherHint')">
+        <Select v-model="fallbackCipher">
+          <option value="">{{ $t('none') }}</option>
+          <option v-for="c in DATA_CIPHERS" :key="c.value" :value="c.value">{{ c.title }}</option>
+        </Select>
+      </Field>
+    </template>
 
     <div v-if="mode === 'static_key'">
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
@@ -109,6 +123,7 @@ import { push } from 'notivue'
 import { i18n } from '@/locales'
 import HttpUtils from '@/plugins/httputil'
 import Btn from '@/components/ui/Btn.vue'
+import ChipSelect from '@/components/ui/ChipSelect.vue'
 import Field from '@/components/ui/Field.vue'
 import Ico from '@/components/ui/Ico.vue'
 import Segmented from '@/components/ui/Segmented.vue'
@@ -154,7 +169,27 @@ const mode = computed({
       if (!props.data.cipher || props.data.cipher.includes('GCM')) {
         props.data.cipher = 'AES-256-CBC'
       }
+      delete props.data.data_ciphers
+      delete props.data.data_ciphers_fallback
     }
+  },
+})
+
+// The canonical names sing-openvpn accepts, AEAD first. The legacy CBC ones are
+// there for old servers, which is also what the fallback is for.
+const DATA_CIPHERS = [
+  'AES-256-GCM', 'AES-128-GCM', 'CHACHA20-POLY1305', 'AES-192-GCM',
+  'AES-256-CBC', 'AES-192-CBC', 'AES-128-CBC',
+  'CAMELLIA-256-CBC', 'CAMELLIA-128-CBC', 'ARIA-256-CBC', 'ARIA-128-CBC',
+  'SM4-CBC', 'SEED-CBC', 'BF-CBC', 'DES-EDE3-CBC',
+].map((c) => ({ title: c, value: c }))
+
+// Order is preference: the chips keep the order they were picked in.
+const dataCiphers = computed({
+  get: (): string[] => props.data?.data_ciphers ?? [],
+  set: (v: string[]) => {
+    if (v.length > 0) props.data.data_ciphers = v
+    else delete props.data.data_ciphers
   },
 })
 
@@ -182,6 +217,7 @@ const username = str('username')
 const password = str('password')
 const cipher = str('cipher')
 const auth = str('auth')
+const fallbackCipher = str('data_ciphers_fallback')
 const staticKeyPath = str('static_key_path')
 
 // static_key and static_key_path are alternatives, so the two are switched

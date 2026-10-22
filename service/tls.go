@@ -153,9 +153,11 @@ func setCertFingerprint(t *model.Tls) {
 		client = map[string]interface{}{}
 	}
 
+	// client.certificate is left alone either way: it is the CA an OpenConnect
+	// or OpenVPN endpoint verifies its server with, and what a subscriber is
+	// told to trust is decided in util.addTls, which never ships the stored one.
 	if pin != "" {
 		client["certificate_public_key_sha256"] = []string{pin}
-		delete(client, "certificate")
 	} else {
 		delete(client, "certificate_public_key_sha256")
 	}

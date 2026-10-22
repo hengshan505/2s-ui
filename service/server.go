@@ -2,8 +2,13 @@ package service
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -266,6 +271,8 @@ func (s *ServerService) GenKeypair(keyType string, options string) []string {
 		return s.generateECHKeyPair(options)
 	case "tls":
 		return s.generateTLSKeyPair(options)
+	case "tls-client":
+		return s.generateTLSClientKeyPair(options)
 	case "reality":
 		return s.generateRealityKeyPair()
 	case "wireguard":
@@ -291,6 +298,48 @@ func (s *ServerService) generateTLSKeyPair(serverName string) []string {
 		return []string{"Failed to generate TLS keypair: ", err.Error()}
 	}
 	return append(strings.Split(string(privateKeyPem), "\n"), strings.Split(string(publicKeyPem), "\n")...)
+}
+
+// generateTLSClientKeyPair is generateTLSKeyPair for the other end: a
+// self-signed certificate an OpenConnect or OpenVPN endpoint presents to its
+// server. sing-box's GenerateCertificate marks its output for server auth and
+// puts the name in the SANs, which a server checking client certificates
+// rejects, so this builds the same RSA-2048 shape marked for client auth. The
+// server has to trust it explicitly, as it would any self-signed one. Same
+// output as the server generator: the key's PEM lines, then the certificate's.
+func (s *ServerService) generateTLSClientKeyPair(commonName string) []string {
+	fail := func(err error) []string {
+		return []string{"Failed to generate TLS client keypair: ", err.Error()}
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fail(err)
+	}
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fail(err)
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.AddDate(0, 12, 0),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		Subject:               pkix.Name{CommonName: commonName},
+	}
+	certificateDer, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+	if err != nil {
+		return fail(err)
+	}
+	keyDer, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return fail(err)
+	}
+	keyPem := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDer})
+	certificatePem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDer})
+	return append(strings.Split(string(keyPem), "\n"), strings.Split(string(certificatePem), "\n")...)
 }
 
 // generateOpenVPNStaticKey produces what `openvpn --genkey secret` writes:

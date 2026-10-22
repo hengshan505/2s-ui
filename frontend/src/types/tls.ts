@@ -151,6 +151,10 @@ export interface oTls {
   client_certificate_path?: string
   client_key?: string[]
   client_key_path?: string
+  // OpenConnect / OpenVPN endpoints only: the server certificates they accept
+  // by fingerprint. No sing-box outbound field -- util.addTls keeps it out of
+  // every subscription.
+  peer_fingerprint?: string[]
   fragment?: boolean
   fragment_fallback_delay?: string
   record_fragment?: boolean

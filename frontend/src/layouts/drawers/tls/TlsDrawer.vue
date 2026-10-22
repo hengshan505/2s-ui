@@ -84,10 +84,72 @@
         </template>
       </template>
 
+      <!-- client authentication: the server side asking for a client
+           certificate. Unlike the endpoint block below it is real sing-box
+           inbound TLS, so an inbound on this config enforces it too -- and the
+           panel hands its subscribers no certificate, which the hint says. -->
+      <template v-if="optionClientAuth">
+        <SectionLabel style="margin-bottom: 8px;">{{ $t('tls.clientAuth') }}</SectionLabel>
+        <MHint style="margin-bottom: 12px;">{{ $t('tls.clientAuthHint') }}</MHint>
+        <Field :label="$t('tls.clientAuthMode')">
+          <Select v-model="clientAuthMode">
+            <option value="">{{ $t('ui.none') }}</option>
+            <option v-for="m in CLIENT_AUTH_MODES" :key="m" :value="m">{{ m }}</option>
+          </Select>
+        </Field>
+        <Field :label="$t('tls.clientCa')" :hint="$t('tls.clientCaHint')">
+          <textarea class="input mono" rows="4" spellcheck="false" v-model="trustedClientCertText"></textarea>
+        </Field>
+      </template>
+
       <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 14px;">
         <SwitchLabel v-model="disableSni" :label="$t('tls.disableSni')" />
         <SwitchLabel v-model="insecure" :label="$t('tls.insecure')" />
       </div>
+
+      <!-- VPN endpoint: how an OpenConnect / OpenVPN endpoint using this config
+           checks its server and proves itself to it. Kept out of every
+           subscription (util.addTls), so it says so rather than look like part
+           of what inbound users get. The CA is text only: certificate_path on
+           the client side is stripped as a server-only field. -->
+      <template v-if="optionEndpointTls">
+        <SectionLabel style="margin-bottom: 8px;">{{ $t('tls.endpoint') }}</SectionLabel>
+        <MHint style="margin-bottom: 12px;">{{ $t('tls.endpointHint') }}</MHint>
+        <Field :label="$t('tls.serverCa')" :hint="$t('tls.serverCaHint')">
+          <textarea class="input mono" rows="4" spellcheck="false" v-model="serverCaText"></textarea>
+        </Field>
+        <Field :label="$t('tls.peerFingerprint')" :hint="$t('tls.peerFingerprintHint')">
+          <input class="input mono" v-model.lazy="peerFingerprints" />
+        </Field>
+        <div style="font-size: 12.5px; font-weight: 600; color: var(--text-2); margin-bottom: 8px;">{{ $t('tls.clientCert') }}</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+          <Segmented
+            v-model="useClientPath"
+            :options="[[0, $t('tls.usePath')], [1, $t('tls.useText')]]"
+            @update:model-value="switchClientCertMode"
+          />
+          <div style="flex: 1;" />
+          <Btn variant="subtle" sm :loading="loading" :title="$t('actions.generate')" @click="genClientCert">
+            <Ico name="key" :size="14" /> {{ $t('actions.generate') }}
+          </Btn>
+        </div>
+        <div v-if="useClientPath == 0" class="grid2">
+          <Field :label="$t('tls.certPath')">
+            <input class="input mono" v-model="clientCertPath" />
+          </Field>
+          <Field :label="$t('tls.keyPath')">
+            <input class="input mono" v-model="clientKeyPath" />
+          </Field>
+        </div>
+        <template v-else>
+          <Field :label="$t('tls.cert')">
+            <textarea class="input mono" rows="4" spellcheck="false" v-model="clientCertText"></textarea>
+          </Field>
+          <Field :label="$t('tls.key')">
+            <textarea class="input mono" rows="4" spellcheck="false" v-model="clientKeyText"></textarea>
+          </Field>
+        </template>
+      </template>
     </template>
 
     <!-- ===================== Reality ===================== -->
@@ -179,6 +241,8 @@
             <div class="pop-item"><SwitchLabel v-model="optionFP" label="UTLS" /></div>
             <div class="pop-item"><SwitchLabel v-model="optionStore" :label="$t('tls.store')" /></div>
             <div class="pop-item"><SwitchLabel v-model="optionKtls" :label="$t('tls.ktls')" /></div>
+            <div class="pop-item"><SwitchLabel v-model="optionClientAuth" :label="$t('tls.clientAuth')" /></div>
+            <div class="pop-item"><SwitchLabel v-model="optionEndpointTls" :label="$t('tls.endpoint')" /></div>
           </template>
           <template v-else>
             <div class="pop-item"><SwitchLabel v-model="optionTime" label="Max Time Difference" /></div>
@@ -227,6 +291,7 @@ import SwitchLabel from '@/components/ui/SwitchLabel.vue'
 import MSwitchRow from '@/components/ui/MSwitchRow.vue'
 import SectionLabel from '@/components/ui/SectionLabel.vue'
 import MultiPick from '@/components/ui/MultiPick.vue'
+import MHint from '@/components/ui/MHint.vue'
 import ChipSelect from '@/components/ui/ChipSelect.vue'
 import KeyInput from '@/components/ui/KeyInput.vue'
 import Ech from '@/components/forms/out/tls/Ech.vue'
@@ -245,6 +310,12 @@ const tlsData = ref<tls>(<tls>{ id: 0, name: '', server: <iTls>{ enabled: true }
 const loading = ref(false)
 const tlsType = ref<string | number>(0)
 const usePath = ref<string | number>(0)
+const useClientPath = ref<string | number>(0)
+// Flags of their own rather than read off the fields: switching a section on
+// must not seed empty values -- an empty path the endpoint would try to open,
+// an empty client CA sing-box would refuse.
+const showEndpointTls = ref(false)
+const showClientAuth = ref(false)
 
 const storeItems = [
   { title: 'Mozilla', value: 'mozilla' },
@@ -264,10 +335,20 @@ const updateData = (id: number) => {
     if (tlsData.value.client == null) tlsData.value.client = {}
     tlsType.value = newData.server?.reality == undefined ? 0 : 1
     usePath.value = newData.server?.key == undefined ? 0 : 1
+    const client = tlsData.value.client
+    const server = tlsData.value.server
+    // Text if either half is stored as text: opening in path mode would hide it,
+    // and switching over from there deletes the paths.
+    useClientPath.value = client.client_certificate == undefined && client.client_key == undefined ? 0 : 1
+    showEndpointTls.value = ENDPOINT_TLS_FIELDS.some((f) => client[f] != undefined)
+    showClientAuth.value = server.client_authentication != undefined || server.client_certificate != undefined
   } else {
     tlsData.value = <tls>{ id: 0, name: '', server: { enabled: true }, client: {} }
     tlsType.value = 0
     usePath.value = 0
+    useClientPath.value = 0
+    showEndpointTls.value = false
+    showClientAuth.value = false
   }
 }
 
@@ -283,6 +364,8 @@ const changeTlsType = () => {
     tlsData.value.server = <iTls>{ enabled: true }
     tlsData.value.client = <oTls>{}
   }
+  showEndpointTls.value = false
+  showClientAuth.value = false
 }
 
 const saveChanges = async () => {
@@ -304,6 +387,36 @@ const switchCertMode = (v: string | number) => {
   }
 }
 
+// Both generators answer with the key's PEM lines, then the certificate's.
+const splitPem = (lines: string[]): { key: string[]; cert: string[] } => {
+  const key = <string[]>[]
+  const cert = <string[]>[]
+  let inKey = false
+  let inCert = false
+  lines.forEach((line: string) => {
+    if (line === '-----BEGIN PRIVATE KEY-----') {
+      inKey = true
+      inCert = false
+      key.push(line)
+    } else if (line === '-----END PRIVATE KEY-----') {
+      inKey = false
+      key.push(line)
+    } else if (line === '-----BEGIN CERTIFICATE-----') {
+      inCert = true
+      inKey = false
+      cert.push(line)
+    } else if (line === '-----END CERTIFICATE-----') {
+      inCert = false
+      cert.push(line)
+    } else if (inKey) {
+      key.push(line)
+    } else if (inCert) {
+      cert.push(line)
+    }
+  })
+  return { key, cert }
+}
+
 const genSelfSigned = async () => {
   loading.value = true
   const msg = await HttpUtils.get('api/keypairs', { k: 'tls', o: inTls.value.server_name ?? "''" })
@@ -313,34 +426,9 @@ const genSelfSigned = async () => {
     inTls.value.certificate_path = undefined
     usePath.value = 1
     if (msg.obj.length > 0) {
-      const privateKey = <string[]>[]
-      const publicKey = <string[]>[]
-      let isPrivateKey = false
-      let isPublicKey = false
-
-      msg.obj.forEach((line: string) => {
-        if (line === '-----BEGIN PRIVATE KEY-----') {
-          isPrivateKey = true
-          isPublicKey = false
-          privateKey.push(line)
-        } else if (line === '-----END PRIVATE KEY-----') {
-          isPrivateKey = false
-          privateKey.push(line)
-        } else if (line === '-----BEGIN CERTIFICATE-----') {
-          isPublicKey = true
-          isPrivateKey = false
-          publicKey.push(line)
-        } else if (line === '-----END CERTIFICATE-----') {
-          isPublicKey = false
-          publicKey.push(line)
-        } else if (isPrivateKey) {
-          privateKey.push(line)
-        } else if (isPublicKey) {
-          publicKey.push(line)
-        }
-      })
-      inTls.value.key = privateKey ?? undefined
-      inTls.value.certificate = publicKey ?? undefined
+      const { key, cert } = splitPem(msg.obj)
+      inTls.value.key = key
+      inTls.value.certificate = cert
     } else {
       push.error({
         message: t('failed') + ': ' + msg.obj,
@@ -348,6 +436,113 @@ const genSelfSigned = async () => {
     }
   }
 }
+
+// ---------------- VPN endpoint (client side) ----------------
+const ENDPOINT_TLS_FIELDS = [
+  'certificate', 'peer_fingerprint',
+  'client_certificate', 'client_certificate_path', 'client_key', 'client_key_path',
+] as const
+
+const optionEndpointTls = computed({
+  get: (): boolean => showEndpointTls.value,
+  set: (v: boolean) => {
+    showEndpointTls.value = v
+    if (!v) ENDPOINT_TLS_FIELDS.forEach((f) => delete outTls.value[f])
+  },
+})
+
+// The CA an endpoint checks its server against. client.certificate is a single
+// PEM string in the panel's types (OutTLS edits it that way too); sing-box
+// takes either shape.
+const serverCaText = computed({
+  get: (): string => {
+    const c: unknown = outTls.value.certificate
+    return Array.isArray(c) ? c.join('\n') : (c as string | undefined) ?? ''
+  },
+  set: (v: string) => {
+    if (v.trim().length > 0) outTls.value.certificate = v
+    else delete outTls.value.certificate
+  },
+})
+
+// Comma- or space-separated, committed on blur/Enter (v-model.lazy): parsing
+// per keystroke would eat the separator before the next value is typed, and
+// holding a trailing one back dropped a paste ending in a space altogether.
+const peerFingerprints = computed({
+  get: (): string => outTls.value.peer_fingerprint?.join(', ') ?? '',
+  set: (v: string) => {
+    const list = v.split(/[\s,]+/).filter((s) => s.length > 0)
+    if (list.length > 0) outTls.value.peer_fingerprint = list
+    else delete outTls.value.peer_fingerprint
+  },
+})
+
+// ---------------- client authentication (server side) ----------------
+// 'no' is sing-box's default, so it is the blank option rather than a second
+// entry that means the same; a stored 'no' shows as that blank too.
+const CLIENT_AUTH_MODES = ['request', 'require-any', 'verify-if-given', 'require-and-verify']
+
+const optionClientAuth = computed({
+  get: (): boolean => showClientAuth.value,
+  set: (v: boolean) => {
+    showClientAuth.value = v
+    if (!v) {
+      delete inTls.value.client_authentication
+      delete inTls.value.client_certificate
+    }
+  },
+})
+
+const clientAuthMode = computed({
+  get: (): string => (inTls.value.client_authentication === 'no' ? '' : inTls.value.client_authentication ?? ''),
+  set: (v: string) => {
+    if (v) inTls.value.client_authentication = v
+    else delete inTls.value.client_authentication
+  },
+})
+
+const switchClientCertMode = (v: string | number) => {
+  if (v == 0) {
+    delete outTls.value.client_certificate
+    delete outTls.value.client_key
+  } else {
+    delete outTls.value.client_certificate_path
+    delete outTls.value.client_key_path
+  }
+}
+
+// The name of the template is the closest thing to an identity there is; the
+// server only checks that it trusts the certificate.
+const genClientCert = async () => {
+  loading.value = true
+  const msg = await HttpUtils.get('api/keypairs', { k: 'tls-client', o: tlsData.value.name || 'client' })
+  loading.value = false
+  if (!msg.success) return
+  const { key, cert } = splitPem(msg.obj ?? [])
+  if (key.length === 0 || cert.length === 0) {
+    push.error({ message: t('failed') + ': ' + msg.obj })
+    return
+  }
+  delete outTls.value.client_certificate_path
+  delete outTls.value.client_key_path
+  outTls.value.client_certificate = cert
+  outTls.value.client_key = key
+  useClientPath.value = 1
+}
+
+// A PEM field stored as its lines, edited as one text. Emptied, it leaves no
+// key rather than [''], which sing-box reads as a certificate and fails on.
+const pemLines = (target: { value: any }, key: string) =>
+  computed({
+    get: (): string => (target.value[key] as string[] | undefined)?.join('\n') ?? '',
+    set: (v: string) => {
+      if (v.trim().length > 0) target.value[key] = v.split('\n')
+      else delete target.value[key]
+    },
+  })
+const clientCertText = pemLines(outTls, 'client_certificate')
+const clientKeyText = pemLines(outTls, 'client_key')
+const trustedClientCertText = pemLines(inTls, 'client_certificate')
 
 // ---------------- reality ----------------
 const genRealityKey = async () => {
@@ -414,14 +609,8 @@ const max_time = computed({
 })
 
 // ---------------- text/value bridges ----------------
-const certText = computed({
-  get: (): string => inTls.value.certificate ? inTls.value.certificate.join('\n') : '',
-  set: (v: string) => { inTls.value.certificate = v.split('\n') },
-})
-const keyText = computed({
-  get: (): string => inTls.value.key ? inTls.value.key.join('\n') : '',
-  set: (v: string) => { inTls.value.key = v.split('\n') },
-})
+const certText = pemLines(inTls, 'certificate')
+const keyText = pemLines(inTls, 'key')
 const disableSni = computed({
   get: () => outTls.value.disable_sni ?? false,
   set: (v: boolean) => { tlsData.value.client.disable_sni = v ? true : undefined },
@@ -459,6 +648,9 @@ const optionalText = (target: any, key: string) =>
   })
 const inHandshakeTimeout = optionalText(inTls, 'handshake_timeout')
 const outHandshakeTimeout = optionalText(outTls, 'handshake_timeout')
+// An emptied path leaves no key too: the endpoint would try to open "".
+const clientCertPath = optionalText(outTls, 'client_certificate_path')
+const clientKeyPath = optionalText(outTls, 'client_key_path')
 const spoofMethodRaw = optionalText(outTls, 'spoof_method')
 const spoofRaw = optionalText(outTls, 'spoof')
 // tlsspoof.ParseOptions refuses "spoof_method requires spoof", and this drawer
