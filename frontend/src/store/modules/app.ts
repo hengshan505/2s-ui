@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { i18n } from '@/locales'
+import { i18n, intlLocale } from '@/locales'
 
 export type Theme = 'dark' | 'light' | 'system'
 export type ResolvedTheme = 'dark' | 'light'
@@ -19,8 +19,13 @@ function applyTheme(theme: Theme) {
   document.documentElement.dataset.theme = resolveTheme(theme)
 }
 
-function applyDir(locale: string) {
-  document.documentElement.dir = RTL_LOCALES.has(locale) ? 'rtl' : 'ltr'
+// lang is what picks CJK glyphs and a screen reader's voice, so a page left at
+// "en" renders Chinese with whatever the fallback font prefers. Set before the
+// app mounts, so nothing is painted under the wrong one.
+function applyLang() {
+  const root = document.documentElement
+  root.lang = intlLocale()
+  root.dir = RTL_LOCALES.has(i18n.global.locale.value) ? 'rtl' : 'ltr'
 }
 
 const AppStore = defineStore('App', {
@@ -36,7 +41,7 @@ const AppStore = defineStore('App', {
   actions: {
     init() {
       applyTheme(this.theme)
-      applyDir(i18n.global.locale.value)
+      applyLang()
       // re-paint when the OS flips its theme, but only while following the system
       darkMedia.addEventListener('change', () => {
         if (this.theme === 'system') applyTheme('system')
@@ -55,7 +60,7 @@ const AppStore = defineStore('App', {
     setLocale(l: string) {
       i18n.global.locale.value = l as any
       localStorage.setItem('locale', l)
-      applyDir(l)
+      applyLang()
     },
   },
 })

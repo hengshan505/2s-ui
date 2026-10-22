@@ -6,18 +6,25 @@ import zhcn from './zhcn'
 import zhtw from './zhtw'
 import ru from './ru'
 
+const messages = {
+  en: en,
+  fa: fa,
+  vi: vi,
+  zhHans: zhcn,
+  zhHant: zhtw,
+  ru: ru
+}
+
+// A stored locale this build has no messages for (another build's, or edited
+// by hand) would render English through fallbackLocale while every Intl
+// consumer and the page's lang went on naming it.
+const stored = localStorage.getItem("locale")
+
 export const i18n = createI18n({
   legacy: false,
-  locale: localStorage.getItem("locale") ?? 'en',
+  locale: stored && Object.prototype.hasOwnProperty.call(messages, stored) ? stored : 'en',
   fallbackLocale: 'en',
-  messages: {
-    en: en,
-    fa: fa,
-    vi: vi,
-    zhHans: zhcn,
-    zhHant: zhtw,
-    ru: ru
-  },
+  messages,
 })
 
 // Must be read per call, not snapshotted: setLocale() only assigns to
