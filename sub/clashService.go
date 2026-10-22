@@ -123,7 +123,7 @@ func (s *ClashService) GetClash(subId string) (*string, []string, error) {
 		return nil, nil, err
 	}
 
-	extOutbounds, extTags := s.LinkService.GetExternalOutbounds(&client.Links)
+	extOutbounds, extTags := s.LinkService.GetExternalOutboundsForClash(&client.Links)
 	*outbounds = append(*outbounds, extOutbounds...)
 	*outTags = append(*outTags, extTags...)
 	uniqueOutboundTags(*outbounds, *outTags)
@@ -487,6 +487,11 @@ func (s *ClashService) ConvertToClashMeta(outbounds *[]map[string]interface{}, b
 					wsOpts["v2ray-http-upgrade"] = true
 				}
 				proxy["ws-opts"] = wsOpts
+			case "xhttp":
+				// Only external links carry this (util.GetOutboundForClash):
+				// sing-box has no XHTTP transport of its own.
+				proxy["network"] = "xhttp"
+				proxy["xhttp-opts"] = xhttpOptsFromTransport(transport)
 			case "grpc":
 				proxy["network"] = "grpc"
 				grpcOpts := make(map[string]interface{})

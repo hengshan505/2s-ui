@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strconv"
@@ -745,6 +746,53 @@ func getTransport(tp_type string, q *url.Values) map[string]interface{} {
 		transport["host"] = tp_host
 	}
 	return transport
+}
+
+// GetOutboundForClash is GetOutbound for the Clash export, which can carry an
+// Xray XHTTP transport that sing-box cannot. A vless link with type=xhttp (or
+// its old name splithttp) keeps host/path/mode and the JSON "extra" blob on its
+// transport for ConvertToClashMeta to map onto mihomo's xhttp-opts. Everything
+// else, and every sing-box JSON caller, gets GetOutbound's result unchanged.
+// sing-box has no XHTTP transport, and getTransport leaves one empty, so there
+// such a link is still served as a plain-TCP vless -- a node that cannot
+// connect, as it was before the Clash export learned this.
+func GetOutboundForClash(uri string, i int) (*map[string]interface{}, string, error) {
+	outbound, tag, err := GetOutbound(uri, i)
+	if err != nil || outbound == nil {
+		return outbound, tag, err
+	}
+	u, parseErr := url.Parse(uri)
+	if parseErr != nil || u.Scheme != "vless" {
+		return outbound, tag, err
+	}
+	q := u.Query()
+	tp := strings.ToLower(q.Get("type"))
+	if tp != "xhttp" && tp != "splithttp" {
+		return outbound, tag, err
+	}
+	transport := map[string]interface{}{"type": "xhttp"}
+	// Presence, not value: an explicit empty host still overrides the one in
+	// extra (xhttpOptsFromTransport).
+	for _, key := range []string{"host", "path", "mode"} {
+		if q.Has(key) {
+			transport[key] = q.Get(key)
+		}
+	}
+	if raw := q.Get("extra"); raw != "" && raw != "null" {
+		var extra map[string]interface{}
+		// UseNumber keeps byte counts like scMaxEachPostBytes exact, and the
+		// second Decode refuses an extra with anything after the object.
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.UseNumber()
+		if decoder.Decode(&extra) == nil && len(extra) > 0 {
+			var trailing interface{}
+			if decoder.Decode(&trailing) == io.EOF {
+				transport["extra"] = extra
+			}
+		}
+	}
+	(*outbound)["transport"] = transport
+	return outbound, tag, nil
 }
 
 func getTls(security string, q *url.Values) map[string]interface{} {

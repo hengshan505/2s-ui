@@ -75,6 +75,17 @@ func GetExternalLink(url string) string {
 }
 
 func GetExternalSub(url string) ([]map[string]interface{}, error) {
+	return getExternalSub(url, GetOutbound)
+}
+
+// GetExternalSubForClash reads a text subscription's links with
+// GetOutboundForClash, so its XHTTP nodes reach the Clash export intact. A
+// sing-box JSON subscription is read the same either way.
+func GetExternalSubForClash(url string) ([]map[string]interface{}, error) {
+	return getExternalSub(url, GetOutboundForClash)
+}
+
+func getExternalSub(url string, parseLink func(string, int) (*map[string]interface{}, string, error)) ([]map[string]interface{}, error) {
 	var err error
 	var result []map[string]interface{}
 
@@ -130,7 +141,7 @@ func GetExternalSub(url string) ([]map[string]interface{}, error) {
 			if link == "" {
 				continue
 			}
-			linkToJson, _, err := GetOutbound(link, 0)
+			linkToJson, _, err := parseLink(link, 0)
 			if err == nil {
 				result = append(result, *linkToJson)
 			}

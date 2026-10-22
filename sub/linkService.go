@@ -67,6 +67,21 @@ func (s *LinkService) GetLinkList(linkJson *json.RawMessage, types string, clien
 }
 
 func (s *LinkService) GetExternalOutbounds(linkJson *json.RawMessage) ([]map[string]interface{}, []string) {
+	return s.getExternalOutbounds(linkJson, util.GetOutbound, util.GetExternalSub)
+}
+
+// GetExternalOutboundsForClash is GetExternalOutbounds for the Clash export:
+// external vless links on Xray's XHTTP transport keep it (see
+// util.GetOutboundForClash), where the sing-box JSON export has to drop it.
+func (s *LinkService) GetExternalOutboundsForClash(linkJson *json.RawMessage) ([]map[string]interface{}, []string) {
+	return s.getExternalOutbounds(linkJson, util.GetOutboundForClash, util.GetExternalSubForClash)
+}
+
+func (s *LinkService) getExternalOutbounds(
+	linkJson *json.RawMessage,
+	parseLink func(string, int) (*map[string]interface{}, string, error),
+	parseSub func(string) ([]map[string]interface{}, error),
+) ([]map[string]interface{}, []string) {
 	links := []Link{}
 	err := json.Unmarshal(*linkJson, &links)
 	if err != nil {
@@ -79,13 +94,13 @@ func (s *LinkService) GetExternalOutbounds(linkJson *json.RawMessage) ([]map[str
 	for _, link := range links {
 		switch link.Type {
 		case "external":
-			outbound, tag, err := util.GetOutbound(link.Uri, 0)
+			outbound, tag, err := parseLink(link.Uri, 0)
 			if err == nil && outbound != nil && len(tag) > 0 {
 				outbounds = append(outbounds, *outbound)
 				tags = append(tags, tag)
 			}
 		case "sub":
-			subOutbounds, err := util.GetExternalSub(link.Uri)
+			subOutbounds, err := parseSub(link.Uri)
 			if err != nil {
 				logger.Warning("sub: Error getting external sub:", err)
 				continue
