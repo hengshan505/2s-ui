@@ -21,18 +21,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// backupBatchSize bounds how many rows go into one INSERT.
-//
-// SQLite caps a statement at SQLITE_MAX_VARIABLE_NUMBER bindings -- 32766 on
-// 3.32 and later, 999 before that. GORM's Save binds every column of every
-// row in one statement, so a table with a few thousand rows blows past it and
-// the whole export fails with "too many SQL variables". stats is the table
-// that gets there: at six columns and a row per resource per bucket, a panel
-// running for a few months has tens of thousands.
-//
-// 500 rows leaves room for the widest table here (Client, ~24 columns) even on
-// the old 999 limit
-const backupBatchSize = 500
+// backupBatchSize bounds how many rows go into one INSERT. The backup file is
+// opened with a plain gorm.Config, so the CreateBatchSize OpenDB sets does not
+// reach it; without this the whole export fails with "too many SQL variables",
+// stats being the table that gets there first. See model.InsertBatch.
+const backupBatchSize = model.InsertBatch
 
 func GetDb(exclude string) ([]byte, error) {
 	exclude_changes, exclude_stats := false, false

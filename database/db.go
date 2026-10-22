@@ -59,6 +59,9 @@ func OpenDB(dbPath string) error {
 
 	c := &gorm.Config{
 		Logger: gormLogger,
+		// Every Create of a slice is split, so none can run into SQLite's
+		// bound-variable limit. See model.InsertBatch.
+		CreateBatchSize: model.InsertBatch,
 	}
 	sep := "?"
 	if strings.Contains(dbPath, "?") {

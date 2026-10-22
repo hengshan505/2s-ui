@@ -250,7 +250,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, err
 		}
-		err = tx.Save(clients).Error
+		err = model.SaveAll(tx, clients)
 		if err != nil {
 			return nil, err
 		}
@@ -326,7 +326,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 				return nil, err
 			}
 		}
-		err = tx.Save(clients).Error
+		err = model.SaveAll(tx, clients)
 		if err != nil {
 			return nil, err
 		}
@@ -1482,7 +1482,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64, loc *time.Location) 
 
 	// Save clients
 	if len(allClients) > 0 {
-		err = tx.Save(allClients).Error
+		err = model.SaveAll(tx, allClients)
 		if err != nil {
 			return nil, nil, false, err
 		}

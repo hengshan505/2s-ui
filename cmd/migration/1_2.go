@@ -295,7 +295,7 @@ func migrateClients(db *gorm.DB) error {
 	if len(oldClients) == 0 {
 		return nil
 	}
-	return db.Save(oldClients).Error
+	return model.SaveAll(db, oldClients)
 }
 
 func migrateChanges(db *gorm.DB) error {

@@ -246,8 +246,10 @@ var (
 
 // maxPendingStats bounds that buffer. A panel whose database has been refusing
 // writes for hours should lose the oldest accounting rather than grow until it
-// is killed for it; at roughly a row per active (resource, tag, direction) per
-// ten seconds this is a few minutes of a busy panel.
+// is killed for it. SaveStats folds what it holds back to a row per active
+// (resource, tag, direction), so only the drains carried over between two
+// flushes stack up here; the cap is a backstop, not something a slow database
+// reaches.
 const maxPendingStats = 50000
 
 // takePending returns the rows still owed to the database and clears the buffer.
@@ -356,9 +358,13 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 	var fresh onlines
 
 	// What the database is owed: anything a previous cycle could not commit,
-	// then this drain. The online lists and the per-inbound deltas below come
-	// from the drain alone.
-	batch := append(takePending(), (*drained)...)
+	// then this drain, folded per key (mergeStats) -- only when something was
+	// carried over, as a drain alone already has a row per key. The online
+	// lists and the per-inbound deltas below come from the drain alone.
+	batch := *drained
+	if pending := takePending(); len(pending) > 0 {
+		batch = mergeStats(append(pending, batch...))
+	}
 	if len(batch) == 0 {
 		setOnlines(fresh)
 		return nil
@@ -473,6 +479,34 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 		DoUpdates: clause.Assignments(map[string]interface{}{"traffic": gorm.Expr("stats.traffic + excluded.traffic")}),
 	}).Create(&batch).Error
 	return err
+}
+
+// mergeStats folds the rows of each (resource, tag, direction) into one, in
+// order of first appearance. A failed cycle comes back in front of the next
+// drain, which has a row for most of the same keys; folded, the batch stays
+// one row per key however many cycles fail in a row. The date is dropped with
+// the duplicates, as every row is stamped with the current bucket before the
+// insert anyway, and so is the id: a rolled-back insert may have filled it in,
+// and the retry must not bind it.
+func mergeStats(rows []model.Stats) []model.Stats {
+	type key struct {
+		resource  string
+		tag       string
+		direction bool
+	}
+	index := make(map[key]int, len(rows))
+	merged := make([]model.Stats, 0, len(rows))
+	for _, row := range rows {
+		k := key{row.Resource, row.Tag, row.Direction}
+		if i, ok := index[k]; ok {
+			merged[i].Traffic += row.Traffic
+			continue
+		}
+		index[k] = len(merged)
+		row.Id = 0
+		merged = append(merged, row)
+	}
+	return merged
 }
 
 func (s *StatsService) GetStats(resource string, tag string, period string) ([]model.Stats, error) {
